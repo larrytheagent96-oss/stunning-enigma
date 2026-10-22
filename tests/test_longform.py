@@ -13,7 +13,7 @@ from pathlib import Path
 from longform import cli, ffmpeg
 from longform.ffmpeg import Cancelled
 from longform.project import Project, ProjectError
-from longform.render import RenderError, render
+from longform.render import RenderError, pieces_for, plan, render
 from longform.server import make_server
 
 SMALL = {"width": 160, "height": 90, "fps": "25", "preset": "ultrafast"}
@@ -72,6 +72,8 @@ class ProjectTests(unittest.TestCase):
             {"clips": ["a.mp4"], "output": {"width": 1281}},
             {"clips": ["a.mp4"], "output": {"fps": "fast"}},
             {"clips": [{"type": "title", "text": "x", "color": "red:x=1"}]},
+            {"clips": ["a.mp4", "b.mp4"], "transition_style": "spin"},
+            {"clips": ["a.mp4", {"path": "b.mp4", "transition": -1}]},
         ]
         for data in bad:
             with self.subTest(data=data), self.assertRaises(ProjectError):
@@ -155,6 +157,57 @@ class RenderTests(MediaTestCase):
         self.assertEqual(seen, sorted(seen))
 
 
+class TransitionTests(MediaTestCase):
+    def test_crossfades_overlap_clips_and_keep_sound_in_sync(self):
+        result, info = self.render({
+            "clips": [
+                {"type": "title", "text": "Hi", "duration": 2, "chapter": "Intro"},
+                {"path": "clip1.mp4", "chapter": "Main"},                       # 2s
+                {"path": "clip10.mov", "transition": 0.4, "transition_style": "wipeleft"},  # 1.5s
+                {"path": "still.png", "duration": 2, "transition": 0},          # straight cut
+            ],
+            "transition": 1, "transition_style": "dissolve",
+        }, "xfade.mp4")
+        # Lengths snap to whole frames: the 1.5s clip is 37.5 frames at 25fps, so it becomes 1.52s.
+        self.assertAlmostEqual(result.duration, 2 + 2 + 1.52 + 2 - 1 - 0.4, delta=0.001)
+        streams = json.loads(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "json",
+             str(result.output)], capture_output=True, text=True, check=True).stdout)["streams"]
+        lengths = {s["codec_type"]: float(s["duration"]) for s in streams if s["codec_type"] in ("video", "audio")}
+        self.assertAlmostEqual(lengths["video"], lengths["audio"], delta=0.005)
+        # A chapter starts where its clip begins to fade in.
+        self.assertEqual([(c.title, round(c.start, 2)) for c in result.chapters], [("Intro", 0), ("Main", 1.0)])
+
+    def test_overlap_is_limited_to_half_of_each_clip(self):
+        project = Project.from_dict({
+            "clips": [{"path": "clip2.mkv"}, {"path": "clip1.mp4"}, {"path": "still.png", "duration": 0.6}],
+            "transition": 5, "output": SMALL,
+        })
+        plans = plan(project, self.dir)
+        self.assertEqual([p.transition_in for p in plans], [0, 0.48, 0.28])  # whole frames at 25fps
+        pieces = pieces_for(project, plans, self.dir)
+        self.assertEqual([p.kind for p in pieces], ["body", "transition", "body", "transition", "body"])
+        self.assertAlmostEqual(sum(p.length for p in pieces), 1 + 2 + 0.6 - 0.48 - 0.28, places=6)
+
+    def test_clip_fades_only_apply_to_edges_without_a_crossfade(self):
+        project = Project.from_dict({
+            "clips": [{"path": "clip1.mp4", "fade_in": 0.5, "fade_out": 0.5},
+                      {"path": "clip2.mkv", "fade_in": 0.3, "fade_out": 0.3}],
+            "transition": 0.4, "output": SMALL,
+        })
+        bodies = [p for p in pieces_for(project, plan(project, self.dir), self.dir) if p.kind == "body"]
+        self.assertEqual([(b.fade_in, b.fade_out) for b in bodies], [(0.5, 0.0), (0.0, 0.3)])
+
+    def test_changing_a_transition_only_re_encodes_that_transition(self):
+        data = {"clips": [{"path": "clip1.mp4"}, {"path": "clip2.mkv"}, {"path": "clip10.mov"}],
+                "transition": 0.4}
+        first, _ = self.render(data, "xf1.mp4")
+        self.assertEqual(first.segments_rendered, 5)
+        data["clips"][2]["transition_style"] = "slideup"
+        second, _ = self.render(data, "xf2.mp4")
+        self.assertEqual((second.segments_rendered, second.segments_cached), (1, 4))
+
+
 class CliTests(MediaTestCase):
     def run_cli(self, *args) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -186,6 +239,14 @@ class CliTests(MediaTestCase):
                                   "--size", "160x90", "--preset", "ultrafast", "-q")
         self.assertEqual(code, 0, text)
         self.assertAlmostEqual(ffmpeg.probe(self.dir / "cli" / "proj.mp4").duration, 2, delta=0.1)
+
+    def test_join_with_crossfade(self):
+        out = self.dir / "cli" / "xfade.mp4"
+        code, text = self.run_cli("join", self.dir / "clip1.mp4", self.dir / "clip2.mkv", "-o", out,
+                                  "--size", "160x90", "--fps", "25", "--preset", "ultrafast",
+                                  "--crossfade", "0.5", "--transition", "circleopen", "-q")
+        self.assertEqual(code, 0, text)
+        self.assertAlmostEqual(ffmpeg.probe(out).duration, 2 + 1 - 0.5, delta=0.05)
 
     def test_errors_are_friendly(self):
         code, text = self.run_cli("join", self.dir / "missing.mp4", "-o", self.dir / "x.mp4")

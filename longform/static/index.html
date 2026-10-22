@@ -177,6 +177,16 @@
           <option value="none">None</option>
         </select></label>
     </div>
+    <div class="grid">
+      <label class="f">Transitions
+        <select id="transition">
+          <option value="0">Straight cuts</option><option value="0.5">0.5s crossfade</option>
+          <option value="1">1s crossfade</option><option value="1.5">1.5s crossfade</option>
+          <option value="2">2s crossfade</option>
+        </select></label>
+      <label class="f" id="transitionStyleBox">Style
+        <select id="transitionStyle"></select></label>
+    </div>
     <label class="check"><input type="checkbox" id="loudnorm"> Even out loudness (−16 LUFS)</label>
     <hr>
     <h2>Background music</h2>
@@ -219,7 +229,7 @@ let saveTimer = null;
 
 function fmt(sec) {
   if (sec == null || !isFinite(sec)) return "–";
-  sec = Math.round(sec);
+  sec = Math.floor(sec + 1e-6);
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
   return h ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
 }
@@ -235,6 +245,30 @@ async function api(path, opts = {}) {
 }
 const mediaFor = (path) => media.find((m) => m.path === path);
 const nameOf = (path) => (path || "").split("/").pop();
+
+const STYLES = [
+  ["fade", "Crossfade"], ["dissolve", "Dissolve"], ["fadeblack", "Dip to black"], ["fadewhite", "Dip to white"],
+  ["wipeleft", "Wipe left"], ["wiperight", "Wipe right"], ["wipeup", "Wipe up"], ["wipedown", "Wipe down"],
+  ["slideleft", "Slide left"], ["slideright", "Slide right"], ["slideup", "Slide up"], ["slidedown", "Slide down"],
+  ["smoothleft", "Smooth left"], ["smoothright", "Smooth right"], ["smoothup", "Smooth up"], ["smoothdown", "Smooth down"],
+  ["circleopen", "Circle open"], ["circleclose", "Circle close"], ["circlecrop", "Circle crop"], ["rectcrop", "Rectangle crop"],
+  ["radial", "Radial"], ["pixelize", "Pixelize"], ["distance", "Distance"], ["hblur", "Blur"], ["zoomin", "Zoom in"],
+];
+const styleName = (s) => (STYLES.find(([v]) => v === s) || [s, s])[1];
+const styleOptions = (selected, withDefault) =>
+  (withDefault ? `<option value="">Project default</option>` : "") +
+  STYLES.map(([v, label]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${label}</option>`).join("");
+
+// Seconds each clip overlaps the one before it; mirrors the renderer's rule that a
+// clip gives at most half its length to each neighbour.
+function overlaps(durations) {
+  return durations.map((d, i) => {
+    if (i === 0 || d == null || durations[i - 1] == null) return 0;
+    const c = project.clips[i];
+    const want = c.transition ?? project.transition ?? 0;
+    return Math.max(0, Math.min(want, durations[i - 1] / 2, d / 2));
+  });
+}
 
 function clipDuration(c) {
   if (c.type === "title") return c.duration || 4;
@@ -290,7 +324,7 @@ function addClip(m) {
   const type = m.is_image ? "image" : "video";
   project.clips.push({ type, path: m.path, start: 0, end: null, duration: type === "image" ? 5 : null,
     fade_in: 0, fade_out: 0, volume: 1, mute: false, chapter: null, text: null, font_size: null,
-    color: "white", background: "black" });
+    color: "white", background: "black", transition: null, transition_style: null });
   changed(); renderTimeline();
 }
 $("addAll").onclick = () => media.filter((m) => !m.error && !AUDIO_EXT.test(m.name)).forEach(addClip);
@@ -342,8 +376,10 @@ const idOf = (c) => { if (!clipIds.has(c)) clipIds.set(c, nextId++); return clip
 function renderTimeline() {
   if (!project) return;
   const tl = $("timeline");
+  const durations = project.clips.map(clipDuration);
+  const overlap = overlaps(durations);
   let total = 0, unknown = false;
-  project.clips.forEach((c) => { const d = clipDuration(c); d == null ? unknown = true : total += d; });
+  durations.forEach((d, i) => { d == null ? unknown = true : total += d - overlap[i]; });
   $("runtime").textContent = fmt(total) + (unknown ? "+" : "");
   $("clipCount").textContent = `${project.clips.length} clip${project.clips.length === 1 ? "" : "s"}`;
   if (!project.clips.length) {
@@ -353,8 +389,8 @@ function renderTimeline() {
   }
   let t = 0;
   tl.innerHTML = project.clips.map((c, i) => {
-    const m = mediaFor(c.path), d = clipDuration(c), at = t;
-    t += d || 0;
+    const m = mediaFor(c.path), d = durations[i], at = t - overlap[i];
+    t = at + (d || 0);
     const missing = c.type !== "title" && !m;
     const name = c.type === "title" ? (c.text || "Title").split("\n")[0] : nameOf(c.path);
     const thumb = c.type === "title"
@@ -366,6 +402,7 @@ function renderTimeline() {
       c.chapter ? `<span class="chip">§ ${esc(c.chapter)}</span>` : "",
       missing ? `<span class="chip warn">missing file</span>` : "",
       c.start || c.end != null ? `<span class="chip">trimmed</span>` : "",
+      overlap[i] ? `<span class="chip" title="Transition from the previous clip">⤫ ${+overlap[i].toFixed(2)}s ${esc(styleName(c.transition_style || project.transition_style))}</span>` : "",
       c.fade_in || c.fade_out ? `<span class="chip">fade</span>` : "",
       c.mute ? `<span class="chip">muted</span>` : "",
     ].join("");
@@ -410,13 +447,18 @@ function clipForm(c, i, m) {
   }
   html += field(i, "fade_in", "Fade in (s)", c.fade_in || "", num + ' placeholder="0"');
   html += field(i, "fade_out", "Fade out (s)", c.fade_out || "", num + ' placeholder="0"');
+  if (i > 0) {
+    html += field(i, "transition", "Transition in (s)", c.transition,
+                  num + ` placeholder="default (${project.transition || 0})" title="Crossfade from the previous clip. 0 = cut."`);
+    html += `<label class="f">Transition style<select data-f="transition_style" data-i="${i}">${styleOptions(c.transition_style, true)}</select></label>`;
+  }
   html += field(i, "chapter", "Chapter name", c.chapter, 'placeholder="none"', true);
   html += `</div>`;
   if (c.type !== "title" && m) html += `<div style="margin-top:8px"><button class="small" data-preview="${i}">▶ Preview from start point</button></div>`;
   return html;
 }
 
-const NUMERIC = new Set(["start", "end", "duration", "fade_in", "fade_out", "volume", "font_size"]);
+const NUMERIC = new Set(["start", "end", "duration", "fade_in", "fade_out", "volume", "font_size", "transition"]);
 $("timeline").addEventListener("input", (e) => {
   const el = e.target, key = el.dataset.f; if (!key) return;
   const c = project.clips[+el.dataset.i];
@@ -482,7 +524,7 @@ $("timeline").addEventListener("dragend", () => { dragFrom = null; renderTimelin
 $("addTitle").onclick = () => {
   project.clips.push({ type: "title", path: null, text: project.output.title || "Title", duration: 4,
     start: 0, end: null, fade_in: 0.5, fade_out: 0.5, volume: 1, mute: false, chapter: null,
-    font_size: null, color: "white", background: "black" });
+    font_size: null, color: "white", background: "black", transition: null, transition_style: null });
   open.add(idOf(project.clips.at(-1)));
   changed(); renderTimeline();
 };
@@ -527,6 +569,11 @@ function syncForm() {
   if (![...$("preset").options].some((op) => op.value === o.preset)) $("preset").add(new Option(o.preset));
   $("preset").value = o.preset;
   $("chapters").value = project.chapters;
+  $("transitionStyle").innerHTML = styleOptions(project.transition_style || "fade", false);
+  const tr = String(project.transition || 0);
+  if (![...$("transition").options].some((op) => op.value === tr)) $("transition").add(new Option(`${tr}s crossfade`, tr));
+  $("transition").value = tr;
+  $("transitionStyleBox").hidden = !project.transition;
   $("loudnorm").checked = !!o.loudnorm;
   renderMusicSelect();
   $("musicOpts").hidden = !project.music;
@@ -540,6 +587,9 @@ function readForm() {
   o.fps = $("fps").value; o.fit = $("fit").value; o.crf = +$("crf").value; o.preset = $("preset").value;
   o.loudnorm = $("loudnorm").checked;
   project.chapters = $("chapters").value;
+  project.transition = +$("transition").value;
+  project.transition_style = $("transitionStyle").value || "fade";
+  $("transitionStyleBox").hidden = !project.transition;
   const mp = $("music").value;
   if (!mp) project.music = null;
   else {
@@ -550,11 +600,13 @@ function readForm() {
     }
   }
 }
-["title", "size", "width", "height", "fps", "fit", "crf", "preset", "chapters", "loudnorm", "music", "musicVolume", "musicDuck"]
+["title", "size", "width", "height", "fps", "fit", "crf", "preset", "chapters", "loudnorm", "music", "musicVolume", "musicDuck",
+ "transition", "transitionStyle"]
   .forEach((id) => $(id).addEventListener("input", () => {
     readForm();
     if (id === "size") { $("customSize").hidden = $("size").value !== "custom"; }
     if (id === "music") syncForm();
+    if (id.startsWith("transition")) renderTimeline();
     changed();
   }));
 

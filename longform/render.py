@@ -1,10 +1,12 @@
 """Turn a Project into one long video.
 
-Every clip is first converted into a normalised segment (same resolution, frame
-rate, pixel format and audio layout). Segments are cached, so changing one clip
-in a long project only re-encodes that clip. The segments are then joined with
-FFmpeg's concat demuxer without re-encoding the video, which keeps the final
-step fast even for multi-hour outputs.
+The timeline is cut into pieces: the body of each clip and, where clips
+crossfade, a short transition piece made from the end of one clip and the start
+of the next. Every piece is encoded to the same resolution, frame rate, pixel
+format and audio layout, and cached, so changing one clip in a long project only
+re-encodes the pieces it touches. The pieces are then joined with FFmpeg's
+concat demuxer without re-encoding the video, which keeps the final step fast
+even for multi-hour outputs.
 """
 
 from __future__ import annotations
@@ -14,10 +16,12 @@ import hashlib
 import json
 import os
 import shutil
+import math
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
@@ -25,10 +29,11 @@ from . import ffmpeg
 from .ffmpeg import Cancelled, FFmpegError, MediaInfo
 from .project import Clip, Output, Project, ProjectError
 
-CACHE_VERSION = "1"
+CACHE_VERSION = "2"
 DEFAULT_IMAGE_SECONDS = 5.0
 DEFAULT_TITLE_SECONDS = 4.0
 AUDIO_RATE = 48000
+MIN_PIECE_SECONDS = 0.02  # anything shorter than this is dropped rather than encoded
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -38,13 +43,14 @@ class RenderError(RuntimeError):
 
 
 @dataclass
-class Segment:
+class ClipPlan:
     index: int
     clip: Clip
     source: Path | None
     info: MediaInfo | None
     duration: float
-    path: Path
+    transition_in: float = 0.0  # seconds overlapped with the previous clip
+    transition_out: float = 0.0  # seconds overlapped with the next clip
 
     @property
     def label(self) -> str:
@@ -53,6 +59,40 @@ class Segment:
         if self.clip.type == "title":
             return (self.clip.text or "Title").strip().splitlines()[0]
         return self.source.stem if self.source else f"Clip {self.index + 1}"
+
+
+@dataclass
+class Part:
+    """A window of one clip: `length` seconds starting `offset` seconds into it."""
+    clip: ClipPlan
+    offset: float
+    length: float
+
+
+@dataclass
+class Piece:
+    kind: str  # "body" or "transition"
+    parts: list[Part]  # one part for a body, outgoing then incoming clip for a transition
+    length: float
+    path: Path
+    style: str | None = None
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+
+    @property
+    def starts_clip(self) -> int | None:
+        """Index of the clip that first appears in this piece, if any."""
+        if self.kind == "transition":
+            return self.parts[1].clip.index
+        plan = self.parts[0].clip
+        return plan.index if plan.transition_in == 0 else None
+
+    @property
+    def label(self) -> str:
+        if self.kind == "transition":
+            a, b = self.parts[0].clip, self.parts[1].clip
+            return f"Crossfading clip {a.index + 1} into {b.index + 1}"
+        return f"Encoding clip {self.parts[0].clip.index + 1}: {self.parts[0].clip.label}"
 
 
 @dataclass
@@ -82,10 +122,10 @@ def format_timestamp(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def plan(project: Project, base_dir: Path, cache_dir: Path) -> list[Segment]:
-    """Resolve sources, probe them and work out each clip's length."""
+def plan(project: Project, base_dir: Path) -> list[ClipPlan]:
+    """Resolve sources, probe them and work out each clip's length and transitions."""
     project.validate()
-    segments = []
+    plans = []
     for i, clip in enumerate(project.clips):
         source = info = None
         if clip.type in ("video", "image"):
@@ -94,10 +134,72 @@ def plan(project: Project, base_dir: Path, cache_dir: Path) -> list[Segment]:
                 info = ffmpeg.probe(source)
             except FFmpegError as e:
                 raise RenderError(f"clip {i + 1}: {e}") from e
-        duration = _clip_duration(i, clip, info)
-        key = _segment_key(clip, project.output, source, duration)
-        segments.append(Segment(i, clip, source, info, duration, cache_dir / f"seg-{key}.mov"))
-    return segments
+        plans.append(ClipPlan(i, clip, source, info, _clip_duration(i, clip, info)))
+    # Work in whole frames so every piece's audio is exactly as long as its video;
+    # otherwise rounding gaps add up over hundreds of pieces and the sound drifts.
+    fps = frame_rate(project.output)
+    frames = [max(1, round(p.duration * fps)) for p in plans]
+    for p, n in zip(plans, frames):
+        p.duration = float(n / fps)
+    for (prev, a), (cur, b) in zip(zip(plans, frames), zip(plans[1:], frames[1:])):
+        wanted = cur.clip.transition if cur.clip.transition is not None else project.transition
+        # A clip can give at most half its length to each neighbour, so its body never goes negative.
+        overlap = min(math.floor(wanted * fps), a // 2, b // 2)
+        if overlap / fps >= MIN_PIECE_SECONDS:
+            prev.transition_out = cur.transition_in = float(overlap / fps)
+    return plans
+
+
+def frame_rate(o: Output) -> Fraction:
+    num, _, den = str(o.fps).partition("/")
+    return Fraction(num) / Fraction(den or 1)
+
+
+def pieces_for(project: Project, plans: list[ClipPlan], cache_dir: Path) -> list[Piece]:
+    """Lay the clips out as bodies and transition pieces, in playing order."""
+    o = project.output
+    pieces = []
+    for p in plans:
+        if p.transition_in:
+            prev = plans[p.index - 1]
+            style = p.clip.transition_style or project.transition_style
+            t = p.transition_in
+            pieces.append(_piece("transition", [Part(prev, prev.duration - t, t), Part(p, 0.0, t)], o, cache_dir,
+                                 style=style))
+        body = p.duration - p.transition_in - p.transition_out
+        if body >= MIN_PIECE_SECONDS:
+            # A clip's own fade only applies to an edge that isn't crossfading.
+            fade_in = 0.0 if p.transition_in else min(p.clip.fade_in, body / 2)
+            fade_out = 0.0 if p.transition_out else min(p.clip.fade_out, body / 2)
+            pieces.append(_piece("body", [Part(p, p.transition_in, body)], o, cache_dir,
+                                 fade_in=fade_in, fade_out=fade_out))
+    return pieces
+
+
+def _piece(kind: str, parts: list[Part], o: Output, cache_dir: Path, **extra) -> Piece:
+    length = parts[-1].length
+    material = {
+        "v": CACHE_VERSION,
+        "kind": kind,
+        "length": round(length, 4),
+        "parts": [_part_material(part) for part in parts],
+        "output": [o.width, o.height, str(o.fps), o.fit, o.background, o.crf, o.preset],
+        **{k: round(v, 4) if isinstance(v, float) else v for k, v in extra.items()},
+    }
+    key = hashlib.sha1(json.dumps(material, sort_keys=True).encode()).hexdigest()[:20]
+    return Piece(kind, parts, length, cache_dir / f"seg-{key}.mov", **extra)
+
+
+def _part_material(part: Part) -> dict:
+    p = part.clip
+    stat = p.source.stat() if p.source else None
+    ignored = {"chapter": None, "transition": None, "transition_style": None, "fade_in": None, "fade_out": None}
+    return {
+        "clip": asdict(p.clip) | ignored | {"path": str(p.source) if p.source else None},
+        "source": [stat.st_size, stat.st_mtime_ns] if stat else None,
+        "offset": round(part.offset, 4),
+        "length": round(part.length, 4),
+    }
 
 
 def _clip_duration(i: int, clip: Clip, info: MediaInfo | None) -> float:
@@ -122,19 +224,6 @@ def _clip_duration(i: int, clip: Clip, info: MediaInfo | None) -> float:
     return duration
 
 
-def _segment_key(clip: Clip, output: Output, source: Path | None, duration: float) -> str:
-    stat = source.stat() if source else None
-    material = {
-        "v": CACHE_VERSION,
-        "clip": asdict(clip) | {"chapter": None, "path": str(source) if source else None},
-        "duration": round(duration, 4),
-        "source": [stat.st_size, stat.st_mtime_ns] if stat else None,
-        "output": [output.width, output.height, str(output.fps), output.fit, output.background,
-                   output.crf, output.preset],
-    }
-    return hashlib.sha1(json.dumps(material, sort_keys=True).encode()).hexdigest()[:20]
-
-
 @functools.cache
 def _drawtext_has_align() -> bool:
     result = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=drawtext"], capture_output=True, text=True)
@@ -153,70 +242,92 @@ def _fit_filter(o: Output) -> str:
     return fit + ",setsar=1"
 
 
-def _fades(prefix: str, clip: Clip, duration: float) -> list[str]:
-    filters = []
-    fade_in = min(clip.fade_in, duration / 2)
-    fade_out = min(clip.fade_out, duration / 2)
-    if fade_in > 0:
-        filters.append(f"{prefix}fade=t=in:st=0:d={fade_in:.3f}")
-    if fade_out > 0:
-        filters.append(f"{prefix}fade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}")
-    return filters
-
-
-def _segment_args(seg: Segment, o: Output, work: Path) -> list[str]:
-    clip, d = seg.clip, seg.duration
+def _part_chain(part: Part, first_input: int, tag: str, o: Output, work: Path) -> tuple[list[str], list[str]]:
+    """Inputs and filters that turn one part into normalised streams labelled [v<tag>] and [a<tag>]."""
+    p, clip, length = part.clip, part.clip.clip, part.length
     size, fps = f"{o.width}x{o.height}", str(o.fps)
-    silence = ["-f", "lavfi", "-t", f"{d:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
+    silence = ["-f", "lavfi", "-t", f"{length:.6f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
     args: list[str] = []
     vf: list[str] = []
-    audio_input = 1
+    video_input, audio_input = 0, 1  # relative to first_input
     use_source_audio = False
 
     if clip.type == "title":
-        color = f"color=c={clip.background}:s={size}:r={fps}:d={d:.3f}"
-        args += ["-f", "lavfi", "-i", color, *silence]
-        text_file = work / f"title-{seg.path.stem}.txt"
-        text_file.write_text(clip.text.strip(), encoding="utf-8")
+        args += ["-f", "lavfi", "-i", f"color=c={clip.background}:s={size}:r={fps}:d={length:.6f}", *silence]
+        text = clip.text.strip()
+        text_file = work / f"title-{hashlib.sha1(text.encode()).hexdigest()[:16]}.txt"
+        text_file.write_text(text, encoding="utf-8")
         font_size = clip.font_size or max(12, o.height // 12)
         drawtext = (f"drawtext=textfile={text_file.name}:fontcolor={clip.color}:fontsize={font_size}"
                     f":line_spacing={font_size // 3}:x=(w-text_w)/2:y=(h-text_h)/2")
         if _drawtext_has_align():
             drawtext += ":text_align=C"
         vf.append(drawtext)
-    elif seg.info.is_image:
-        args += ["-loop", "1", "-framerate", fps, "-t", f"{d:.3f}", "-i", str(seg.source), *silence]
-        vf += [_fit_filter(o), f"fps={fps}"]
+    elif p.info.is_image:
+        args += ["-loop", "1", "-framerate", fps, "-t", f"{length:.6f}", "-i", str(p.source), *silence]
+        vf.append(_fit_filter(o))
     else:
-        trim = (["-ss", f"{clip.start:.3f}"] if clip.start > 0 else []) + ["-t", f"{d + 0.25:.3f}"]
-        if seg.info.has_video:
-            args += [*trim, "-i", str(seg.source)]
-            vf += [_fit_filter(o), f"fps={fps}"]
-            use_source_audio = seg.info.has_audio and not clip.mute
-            if not use_source_audio:
-                args += silence
+        seek = clip.start + part.offset
+        trim = (["-ss", f"{seek:.6f}"] if seek > 0 else []) + ["-t", f"{length + 0.25:.6f}"]
+        use_source_audio = p.info.has_audio and not clip.mute
+        if p.info.has_video:
+            args += [*trim, "-i", str(p.source)]
+            vf.append(_fit_filter(o))
+            audio_input = 0 if use_source_audio else 1
         else:  # audio-only file: play it over a plain background
-            args += ["-f", "lavfi", "-i", f"color=c={o.background}:s={size}:r={fps}:d={d:.3f}",
-                     *trim, "-i", str(seg.source)]
-            use_source_audio = not clip.mute
-            if not use_source_audio:
-                args += silence
-                audio_input = 2
+            args += ["-f", "lavfi", "-i", f"color=c={o.background}:s={size}:r={fps}:d={length:.6f}",
+                     *trim, "-i", str(p.source)]
+            audio_input = 1 if use_source_audio else 2
+        if not use_source_audio:
+            args += silence
 
-    vf += ["format=yuv420p", "tpad=stop_mode=clone:stop_duration=2", *_fades("", clip, d)]
+    # Every chain ends with the same frame rate, timebase, format and exact length, so
+    # pieces can be crossfaded with each other and joined without re-encoding.
+    vf += [f"fps={fps}", "format=yuv420p", "tpad=stop_mode=clone:stop_duration=2",
+           f"trim=duration={length:.6f}", "setpts=PTS-STARTPTS"]
     af = [f"aresample={AUDIO_RATE}", "aformat=sample_fmts=s16:channel_layouts=stereo"]
-    if use_source_audio:
-        audio_input = 0 if seg.info.has_video else 1
-        if clip.volume != 1:
-            af.append(f"volume={clip.volume:.3f}")
-    af += ["apad", *_fades("a", clip, d)]
+    if use_source_audio and clip.volume != 1:
+        af.append(f"volume={clip.volume:.6f}")
+    af += ["apad", f"atrim=duration={length:.6f}", "asetpts=PTS-STARTPTS"]
+    filters = [
+        f"[{first_input + video_input}:v]{','.join(vf)}[v{tag}]",
+        f"[{first_input + audio_input}:a]{','.join(af)}[a{tag}]",
+    ]
+    return args, filters
 
+
+def _count_inputs(args: list[str]) -> int:
+    return sum(1 for a in args if a == "-i")
+
+
+def _piece_args(piece: Piece, o: Output, work: Path) -> list[str]:
+    inputs: list[str] = []
+    graph: list[str] = []
+    for n, part in enumerate(piece.parts):
+        args, filters = _part_chain(part, _count_inputs(inputs), str(n), o, work)
+        inputs += args
+        graph += filters
+    length = piece.length
+    if piece.kind == "transition":
+        graph.append(f"[v0][v1]xfade=transition={piece.style}:duration={length:.6f}:offset=0[vout]")
+        graph.append(f"[a0][a1]acrossfade=d={length:.6f}[aout]")
+    else:
+        vfades, afades = [], []
+        if piece.fade_in > 0:
+            vfades.append(f"fade=t=in:st=0:d={piece.fade_in:.6f}")
+            afades.append(f"afade=t=in:st=0:d={piece.fade_in:.6f}")
+        if piece.fade_out > 0:
+            st = length - piece.fade_out
+            vfades.append(f"fade=t=out:st={st:.6f}:d={piece.fade_out:.6f}")
+            afades.append(f"afade=t=out:st={st:.6f}:d={piece.fade_out:.6f}")
+        graph.append(f"[v0]{','.join(vfades) or 'null'}[vout]")
+        graph.append(f"[a0]{','.join(afades) or 'anull'}[aout]")
     return [
-        *args,
-        "-map", "0:v:0", "-map", f"{audio_input}:a:0",
-        "-vf", ",".join(vf), "-af", ",".join(af),
-        "-t", f"{d:.3f}",
-        "-c:v", "libx264", "-preset", o.preset, "-crf", str(o.crf), "-pix_fmt", "yuv420p", "-r", fps,
+        *inputs,
+        "-filter_complex", ";".join(graph),
+        "-map", "[vout]", "-map", "[aout]",
+        "-t", f"{length:.6f}",
+        "-c:v", "libx264", "-preset", o.preset, "-crf", str(o.crf), "-pix_fmt", "yuv420p", "-r", str(o.fps),
         "-c:a", "pcm_s16le", "-ar", str(AUDIO_RATE), "-ac", "2",
         "-video_track_timescale", "90000",
         "-f", "mov",
@@ -230,16 +341,18 @@ def _media_duration(path: Path) -> float:
     return info.duration
 
 
-def _chapters(project: Project, segments: list[Segment], durations: list[float]) -> list[Chapter]:
+def _chapters(project: Project, plans: list[ClipPlan], pieces: list[Piece], lengths: list[float]) -> list[Chapter]:
     if project.chapters == "none":
         return []
-    starts, t = [], 0.0
-    for d in durations:
-        starts.append(t)
-        t += d
+    clip_starts: dict[int, float] = {}
+    t = 0.0
+    for piece, length in zip(pieces, lengths):
+        if piece.starts_clip is not None:
+            clip_starts.setdefault(piece.starts_clip, t)
+        t += length
     total = t
-    marks = [(starts[s.index], s.label) for s in segments
-             if project.chapters == "clips" or s.clip.chapter]
+    marks = [(clip_starts[p.index], p.label) for p in plans
+             if p.index in clip_starts and (project.chapters == "clips" or p.clip.chapter)]
     if not marks:
         return []
     if marks[0][0] > 0.5:
@@ -277,9 +390,9 @@ def _audio_graph(project: Project, total: float) -> str | None:
     if music:
         fade = min(music.fade_out, total / 2)
         m = (f"[2:a]aresample={AUDIO_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
-             f"volume={music.volume:.3f}")
+             f"volume={music.volume:.6f}")
         if fade > 0:
-            m += f",afade=t=out:st={total - fade:.3f}:d={fade:.3f}"
+            m += f",afade=t=out:st={total - fade:.6f}:d={fade:.6f}"
         parts.append(m + "[music]")
         if music.duck:
             parts.append("[0:a]asplit=2[main][side]")
@@ -316,36 +429,37 @@ def render(
     o = project.output
 
     try:
-        segments = plan(project, base_dir, cache)
+        plans = plan(project, base_dir)
     except ProjectError as e:
         raise RenderError(str(e)) from e
-    total = sum(s.duration for s in segments)
-    # Identical clips (same file, trim and settings) share one encoded segment.
-    groups: dict[Path, list[Segment]] = {}
-    for s in segments:
-        groups.setdefault(s.path, []).append(s)
-    done = {s.index: (s.duration if s.path.exists() else 0.0) for s in segments}
+    pieces = pieces_for(project, plans, cache)
+    total = sum(p.length for p in pieces)
+    # Identical pieces (same file, trim and settings) are encoded once and reused.
+    groups: dict[Path, list[int]] = {}
+    for n, piece in enumerate(pieces):
+        groups.setdefault(piece.path, []).append(n)
+    done = {n: (piece.length if piece.path.exists() else 0.0) for n, piece in enumerate(pieces)}
     to_encode = [group for path, group in groups.items() if not path.exists()]
     lock = threading.Lock()
-    # Encoding the segments is most of the work; the final join is the last 10%.
+    # Encoding the pieces is most of the work; the final join is the last 10%.
     segment_share = 0.9
 
-    def update(group: list[Segment], seconds: float, message: str) -> None:
+    def update(group: list[int], seconds: float, message: str) -> None:
         with lock:
-            for s in group:
-                done[s.index] = seconds
+            for n in group:
+                done[n] = seconds
             fraction = segment_share * sum(done.values()) / total if total else 0
         report(fraction, message)
 
-    def build(group: list[Segment]) -> None:
-        seg = group[0]
-        tmp = seg.path.with_name(seg.path.stem + ".partial.mov")
-        label = f"Encoding clip {seg.index + 1}/{len(segments)}: {seg.label}"
+    def build(group: list[int]) -> None:
+        piece = pieces[group[0]]
+        tmp = piece.path.with_name(piece.path.stem + ".partial.mov")
+        label = f"{piece.label} (of {len(plans)})"
         update(group, 0.0, label)
         try:
             ffmpeg.run(
-                [*_segment_args(seg, o, cache), str(tmp)],
-                duration=seg.duration, cancel=cancel, cwd=cache,
+                [*_piece_args(piece, o, cache), str(tmp)],
+                duration=piece.length, cancel=cancel, cwd=cache,
                 on_progress=lambda s: update(group, s, label),
             )
         except Cancelled:
@@ -353,12 +467,15 @@ def render(
             raise
         except FFmpegError as e:
             tmp.unlink(missing_ok=True)
-            raise RenderError(f"clip {seg.index + 1} ({seg.label}): {e}") from e
-        tmp.replace(seg.path)
-        update(group, seg.duration, label)
+            clips = " and ".join(f"clip {part.clip.index + 1} ({part.clip.label})" for part in piece.parts)
+            raise RenderError(f"{clips}: {e}") from e
+        tmp.replace(piece.path)
+        update(group, piece.length, label)
 
     cached = len(groups) - len(to_encode)
-    report(0.0, f"{len(segments)} clips, {format_timestamp(total)} total ({cached} already encoded)")
+    transitions = sum(1 for p in pieces if p.kind == "transition")
+    report(0.0, f"{len(plans)} clips, {transitions} transitions, {format_timestamp(total)} total "
+                f"({cached} pieces already encoded)")
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         futures = [pool.submit(build, g) for g in to_encode]
         try:
@@ -369,17 +486,17 @@ def render(
                 f.cancel()
             raise
 
-    lengths = {path: _media_duration(path) for path in groups}
-    durations = [lengths[s.path] for s in segments]
-    total = sum(durations)
-    chapters = _chapters(project, segments, durations)
+    measured = {path: _media_duration(path) for path in groups}
+    lengths = [measured[p.path] for p in pieces]
+    total = sum(lengths)
+    chapters = _chapters(project, plans, pieces, lengths)
 
     job_dir = cache / f"job-{os.getpid()}-{threading.get_ident()}"
     job_dir.mkdir(exist_ok=True)
     try:
         concat_list = job_dir / "list.txt"
         concat_list.write_text(
-            "".join("file '" + str(s.path).replace("'", "'\\''") + "'\n" for s in segments), encoding="utf-8")
+            "".join("file '" + str(p.path).replace("'", "'\\''") + "'\n" for p in pieces), encoding="utf-8")
         metadata = job_dir / "metadata.txt"
         _write_metadata(metadata, project, chapters)
 

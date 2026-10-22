@@ -19,6 +19,13 @@ MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 CLIP_TYPES = ("video", "image", "title")
 FIT_MODES = ("contain", "cover", "stretch")
 CHAPTER_MODES = ("marked", "clips", "none")
+# Styles of FFmpeg's xfade filter (all available since FFmpeg 4.3).
+TRANSITION_STYLES = (
+    "fade", "dissolve", "fadeblack", "fadewhite", "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown", "smoothleft", "smoothright", "smoothup",
+    "smoothdown", "circleopen", "circleclose", "circlecrop", "rectcrop", "radial", "pixelize",
+    "distance", "hblur", "zoomin",
+)
 
 _COLOR_RE = re.compile(r"^[#A-Za-z0-9@.]+$")
 _FPS_RE = re.compile(r"^\d+(\.\d+)?(/\d+)?$")
@@ -89,6 +96,9 @@ class Clip:
     volume: float = 1.0
     mute: bool = False
     chapter: str | None = None
+    # Crossfade from the previous clip into this one, in seconds. None uses the project default.
+    transition: float | None = None
+    transition_style: str | None = None
 
     def validate(self, index: int) -> None:
         where = f"clip {index + 1}"
@@ -108,6 +118,10 @@ class Clip:
             raise ProjectError(f"{where}: fades cannot be negative")
         if self.volume < 0:
             raise ProjectError(f"{where}: volume cannot be negative")
+        if self.transition is not None and self.transition < 0:
+            raise ProjectError(f"{where}: transition cannot be negative")
+        if self.transition_style is not None:
+            check_transition_style(self.transition_style, where)
         for name in ("color", "background"):
             if not _COLOR_RE.match(getattr(self, name)):
                 raise ProjectError(f"{where}: invalid {name} {getattr(self, name)!r}")
@@ -119,6 +133,8 @@ class Project:
     output: Output = field(default_factory=Output)
     music: Music | None = None
     chapters: str = "marked"  # marked = only clips with a chapter name, clips = every clip
+    transition: float = 0.0  # default crossfade between clips, in seconds (0 = straight cut)
+    transition_style: str = "fade"
 
     def validate(self) -> None:
         if not self.clips:
@@ -126,6 +142,9 @@ class Project:
         self.output.validate()
         if self.chapters not in CHAPTER_MODES:
             raise ProjectError(f"chapters must be one of {', '.join(CHAPTER_MODES)}")
+        if self.transition < 0:
+            raise ProjectError("transition cannot be negative")
+        check_transition_style(self.transition_style, "project")
         for i, clip in enumerate(self.clips):
             clip.validate(i)
 
@@ -156,6 +175,11 @@ class Project:
             music=_build(Music, music, "music") if music else None,
             chapters=data.get("chapters", "marked"),
         )
+        try:
+            project.transition = float(data.get("transition") or 0)
+        except (TypeError, ValueError) as e:
+            raise ProjectError(f"invalid transition {data.get('transition')!r}") from e
+        project.transition_style = str(data.get("transition_style") or "fade")
         return project
 
     @classmethod
@@ -171,6 +195,11 @@ class Project:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2)
             f.write("\n")
+
+
+def check_transition_style(style: str, where: str) -> None:
+    if style not in TRANSITION_STYLES:
+        raise ProjectError(f"{where}: unknown transition style {style!r} (choose from {', '.join(TRANSITION_STYLES)})")
 
 
 def _build(cls, raw: dict, where: str):

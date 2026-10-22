@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import __version__, ffmpeg
 from .ffmpeg import Cancelled, FFmpegError
-from .project import Clip, Music, Output, Project, ProjectError, clip_type_for, is_media_file
+from .project import TRANSITION_STYLES, Clip, Music, Project, ProjectError, clip_type_for, is_media_file
 from .render import RenderError, format_timestamp, render
 
 
@@ -56,9 +56,18 @@ def add_output_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--crf", type=int, help="quality, lower is better (default 20)")
     p.add_argument("--preset", help="x264 speed preset, e.g. veryfast, medium, slow")
     p.add_argument("--loudnorm", action="store_true", default=None, help="normalise loudness to -16 LUFS")
+    p.add_argument("--crossfade", type=float, metavar="SECONDS",
+                   help="crossfade between every pair of clips (0 = straight cuts)")
+    p.add_argument("--transition", choices=TRANSITION_STYLES, metavar="STYLE",
+                   help=f"crossfade style: {', '.join(TRANSITION_STYLES)} (default fade)")
 
 
-def apply_output_options(output: Output, args: argparse.Namespace) -> None:
+def apply_output_options(project: Project, args: argparse.Namespace) -> None:
+    if args.crossfade is not None:
+        project.transition = args.crossfade
+    if args.transition:
+        project.transition_style = args.transition
+    output = project.output
     if args.size:
         output.width, output.height = args.size
     for name in ("fps", "fit", "crf", "preset", "loudnorm"):
@@ -76,7 +85,7 @@ def project_from_files(args: argparse.Namespace) -> Project:
             clip.duration = args.image_duration
         clips.append(clip)
     project = Project(clips=clips, chapters="clips" if args.chapters else "none")
-    apply_output_options(project.output, args)
+    apply_output_options(project, args)
     if args.title:
         project.output.title = args.title
         project.clips.insert(0, Clip(type="title", text=args.title, fade_in=args.fade, fade_out=args.fade))
@@ -158,7 +167,7 @@ def _relative(path: Path, base: Path) -> str:
 def cmd_render(args: argparse.Namespace) -> int:
     project_file = Path(args.project)
     project = Project.load(project_file)
-    apply_output_options(project.output, args)
+    apply_output_options(project, args)
     output = args.output or str(project_file.with_suffix(".mp4"))
     return do_render(project, output, project_file.resolve().parent, args, keep_cache=not args.no_cache)
 
