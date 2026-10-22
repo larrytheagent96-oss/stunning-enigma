@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+.longform-cache/
+longform-workspace/
+*.partial.*

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longform"
+version = "0.1.0"
+description = "Put any videos together into one long-form video, from the command line or a browser editor."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+longform = "longform.cli:main"
+
+[tool.setuptools]
+packages = ["longform"]
+
+[tool.setuptools.package-data]
+longform = ["static/*"]

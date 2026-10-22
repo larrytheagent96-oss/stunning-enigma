@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Longform Editor</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+    --text: #e7e9ee; --muted: #8b93a3; --accent: #5b8cff; --accent-2: #3d6ef0;
+    --danger: #ff6b6b; --ok: #3ecf8e; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  header h1 span { color: var(--accent); }
+  header input { flex: 1; max-width: 420px; }
+  .runtime { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .runtime b { color: var(--text); font-size: 18px; }
+  #saveState { color: var(--muted); font-size: 12px; min-width: 60px; text-align: right; }
+  main { display: grid; grid-template-columns: 300px 1fr 330px; gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+               margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  section h2 .spacer { flex: 1; }
+  input, select, textarea { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+         border-radius: 7px; padding: 6px 8px; font: inherit; width: 100%; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  input[type=checkbox] { width: auto; }
+  button { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 7px;
+           padding: 6px 10px; font: inherit; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: var(--accent-2); }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.small { padding: 3px 7px; font-size: 12px; }
+  button.danger:hover { border-color: var(--danger); color: var(--danger); }
+  .muted { color: var(--muted); }
+  .drop { border: 2px dashed var(--line); border-radius: var(--radius); padding: 18px; text-align: center;
+          color: var(--muted); cursor: pointer; transition: .15s; }
+  .drop.over, .drop:hover { border-color: var(--accent); color: var(--text); }
+  .uploads { margin-top: 8px; display: grid; gap: 6px; }
+  .upload { font-size: 12px; }
+  .bar { height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .media-list { display: grid; gap: 8px; margin-top: 12px; max-height: 60vh; overflow: auto; }
+  .media { display: grid; grid-template-columns: 72px 1fr; gap: 10px; padding: 6px; border-radius: 8px;
+           background: var(--panel-2); border: 1px solid transparent; }
+  .media:hover { border-color: var(--line); }
+  .thumb { width: 72px; height: 44px; border-radius: 5px; background: #000 center/cover no-repeat;
+           display: grid; place-items: center; color: var(--muted); font-size: 18px; overflow: hidden; }
+  .media .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .media .meta { font-size: 12px; color: var(--muted); }
+  .media .actions { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+  .timeline { display: grid; gap: 8px; min-height: 120px; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 10px; border: 2px dashed var(--line);
+           border-radius: var(--radius); }
+  .clip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; }
+  .clip.dragging { opacity: .4; }
+  .clip.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+  .clip.drop-after { box-shadow: 0 3px 0 var(--accent); }
+  .clip-head { display: grid; grid-template-columns: 22px 28px 72px 1fr auto auto; gap: 10px;
+               align-items: center; padding: 8px 10px; cursor: pointer; }
+  .handle { cursor: grab; color: var(--muted); text-align: center; user-select: none; }
+  .num { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; }
+  .clip-title { overflow: hidden; }
+  .clip-title .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .clip-title .meta { font-size: 12px; color: var(--muted); }
+  .chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+          background: #263457; color: #a9c1ff; margin-right: 4px; }
+  .chip.warn { background: #4a2626; color: #ffb3b3; }
+  .clip-dur { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .clip-buttons { display: flex; gap: 4px; }
+  .clip-body { display: none; padding: 4px 12px 12px 72px; }
+  .clip.open .clip-body { display: block; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px 12px; }
+  label.f { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+  label.f.wide { grid-column: 1 / -1; }
+  label.check { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .stack { display: grid; gap: 10px; }
+  .progress { height: 10px; background: var(--panel-2); border-radius: 6px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #8a6bff);
+                    transition: width .3s; }
+  #renderMsg { font-size: 12px; color: var(--muted); min-height: 18px; word-break: break-word; }
+  #renderMsg.error { color: var(--danger); white-space: pre-wrap; }
+  video { width: 100%; border-radius: 8px; background: #000; max-height: 360px; }
+  .renders { display: grid; gap: 6px; }
+  .render-item { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+  .render-item a { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #2b1d1d;
+           color: #ffd0d0; border: 1px solid var(--danger); padding: 10px 16px; border-radius: 8px;
+           display: none; max-width: 80vw; z-index: 20; }
+</style>
+</head>
+<body>
+<header>
+  <h1>long<span>form</span></h1>
+  <input id="title" placeholder="Video title (optional)">
+  <div class="runtime">Total <b id="runtime">0:00</b> · <span id="clipCount">0 clips</span></div>
+  <div id="saveState"></div>
+</header>
+
+<main>
+  <!-- Library -->
+  <section>
+    <h2>Library <span class="spacer"></span>
+      <button class="small" id="addAll" title="Add every video and image to the timeline">Add all</button></h2>
+    <div class="drop" id="drop">
+      <b>Drop videos, images or music here</b><br><span>or click to choose files</span>
+      <input type="file" id="fileInput" multiple hidden
+             accept="video/*,image/*,audio/*,.mkv,.mts,.m2ts,.mxf">
+    </div>
+    <div class="uploads" id="uploads"></div>
+    <div class="media-list" id="mediaList"></div>
+  </section>
+
+  <!-- Timeline -->
+  <section>
+    <h2>Timeline <span class="spacer"></span>
+      <button class="small" id="addTitle">+ Title card</button>
+      <button class="small" id="expandAll">Expand all</button>
+      <button class="small danger" id="clearAll">Clear</button></h2>
+    <div class="timeline" id="timeline"></div>
+    <div style="margin-top:14px">
+      <video id="preview" controls preload="metadata" hidden></video>
+    </div>
+  </section>
+
+  <!-- Output -->
+  <section class="stack">
+    <h2>Output</h2>
+    <div class="grid">
+      <label class="f">Size
+        <select id="size">
+          <option value="3840x2160">4K 3840×2160</option>
+          <option value="2560x1440">1440p</option>
+          <option value="1920x1080">1080p</option>
+          <option value="1280x720">720p</option>
+          <option value="854x480">480p</option>
+          <option value="1080x1920">Vertical 1080×1920</option>
+          <option value="1080x1080">Square 1080×1080</option>
+          <option value="custom">Custom…</option>
+        </select></label>
+      <label class="f">Frame rate
+        <select id="fps">
+          <option>24</option><option>25</option><option>29.97</option><option>30</option>
+          <option>50</option><option>60</option>
+        </select></label>
+      <label class="f" id="customSize" hidden>Width × height
+        <div class="row"><input id="width" type="number" step="2"><input id="height" type="number" step="2"></div></label>
+      <label class="f">Different shapes
+        <select id="fit">
+          <option value="contain">Fit (black bars)</option>
+          <option value="cover">Fill (crop)</option>
+          <option value="stretch">Stretch</option>
+        </select></label>
+      <label class="f">Quality
+        <select id="crf">
+          <option value="16">Very high</option><option value="20">High</option>
+          <option value="23">Medium</option><option value="28">Small file</option>
+        </select></label>
+      <label class="f">Speed
+        <select id="preset">
+          <option value="ultrafast">Fastest</option><option value="veryfast">Fast</option>
+          <option value="medium">Balanced</option><option value="slow">Smaller file</option>
+        </select></label>
+      <label class="f">Chapters
+        <select id="chapters">
+          <option value="marked">Only named</option><option value="clips">Every clip</option>
+          <option value="none">None</option>
+        </select></label>
+    </div>
+    <label class="check"><input type="checkbox" id="loudnorm"> Even out loudness (−16 LUFS)</label>
+    <hr>
+    <h2>Background music</h2>
+    <select id="music"><option value="">None</option></select>
+    <div class="grid" id="musicOpts" hidden>
+      <label class="f">Volume <input id="musicVolume" type="range" min="0" max="1" step="0.05"></label>
+      <label class="check"><input type="checkbox" id="musicDuck"> Lower under speech</label>
+    </div>
+    <hr>
+    <label class="f">File name <input id="filename" placeholder="my-video.mp4"></label>
+    <div class="row">
+      <button class="primary" id="renderBtn" style="flex:1">Render video</button>
+      <button id="cancelBtn" hidden>Cancel</button>
+    </div>
+    <div class="progress"><div id="progressBar"></div></div>
+    <div id="renderMsg"></div>
+    <div id="result" class="stack" hidden>
+      <video id="resultVideo" controls preload="metadata"></video>
+      <a id="downloadLink"><button class="primary" style="width:100%">Download</button></a>
+      <label class="f" id="chaptersBox" hidden>Chapters (paste into a YouTube description)
+        <textarea id="chaptersText" rows="5" readonly></textarea></label>
+    </div>
+    <hr>
+    <h2>Past renders</h2>
+    <div class="renders" id="renders"><span class="muted">None yet</span></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const enc = (name) => name.split("/").map(encodeURIComponent).join("/");
+const AUDIO_EXT = /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i;
+
+let media = [];          // library entries from /api/media
+let project = null;      // the timeline being edited
+const open = new Set();  // indices of expanded clips (by clip identity)
+let saveTimer = null;
+
+function fmt(sec) {
+  if (sec == null || !isFinite(sec)) return "–";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
+}
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = "none", 6000);
+}
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+const mediaFor = (path) => media.find((m) => m.path === path);
+const nameOf = (path) => (path || "").split("/").pop();
+
+function clipDuration(c) {
+  if (c.type === "title") return c.duration || 4;
+  const m = mediaFor(c.path);
+  if (c.type === "image" || m?.is_image) return c.duration || 5;
+  if (!m || m.duration == null) return null;
+  let end = c.end != null ? Math.min(c.end, m.duration) : m.duration;
+  let d = Math.max(0, end - (c.start || 0));
+  if (c.duration) d = Math.min(d, c.duration);
+  return d;
+}
+
+// ---------- library ----------
+async function loadMedia() {
+  media = await api("/api/media");
+  renderMedia();
+  renderTimeline();
+  renderMusicSelect();
+}
+function renderMedia() {
+  const list = $("mediaList");
+  if (!media.length) { list.innerHTML = `<div class="muted" style="text-align:center;padding:10px">No media yet</div>`; return; }
+  list.innerHTML = media.map((m, i) => {
+    const audio = AUDIO_EXT.test(m.name);
+    const meta = m.error ? `<span class="chip warn">unreadable</span>`
+      : [m.is_image ? "image" : fmt(m.duration), m.width ? `${m.width}×${m.height}` : (audio ? "audio" : ""),
+         !m.is_image && m.has_video && !m.has_audio ? "no sound" : ""].filter(Boolean).join(" · ");
+    const thumb = audio ? `<div class="thumb">♪</div>`
+      : `<div class="thumb" style="background-image:url('/api/thumb/${enc(m.name)}')"></div>`;
+    return `<div class="media">${thumb}<div style="min-width:0">
+      <div class="name" title="${esc(m.name)}">${esc(m.name)}</div><div class="meta">${meta}</div>
+      <div class="actions">
+        ${m.error ? "" : `<button class="small" data-add="${i}">+ Add</button>`}
+        ${!m.error && !m.is_image ? `<button class="small" data-music="${i}" title="Use as background music">♪</button>` : ""}
+        <button class="small" data-play="${i}" ${m.error ? "hidden" : ""}>▶</button>
+        <button class="small danger" data-del="${i}" title="Delete file">✕</button>
+      </div></div></div>`;
+  }).join("");
+}
+$("mediaList").addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  const m = media[b.dataset.add ?? b.dataset.music ?? b.dataset.play ?? b.dataset.del];
+  if (b.dataset.add != null) addClip(m);
+  else if (b.dataset.music != null) { project.music = { path: m.path, volume: 0.25, duck: true, fade_out: 3 }; syncForm(); changed(); }
+  else if (b.dataset.play != null) preview(m.path, 0);
+  else if (b.dataset.del != null) {
+    if (!confirm(`Delete ${m.name} from the workspace?`)) return;
+    await api(`/api/media/${enc(m.name)}`, { method: "DELETE" });
+    loadMedia();
+  }
+});
+function addClip(m) {
+  const type = m.is_image ? "image" : "video";
+  project.clips.push({ type, path: m.path, start: 0, end: null, duration: type === "image" ? 5 : null,
+    fade_in: 0, fade_out: 0, volume: 1, mute: false, chapter: null, text: null, font_size: null,
+    color: "white", background: "black" });
+  changed(); renderTimeline();
+}
+$("addAll").onclick = () => media.filter((m) => !m.error && !AUDIO_EXT.test(m.name)).forEach(addClip);
+
+// uploads
+$("drop").onclick = () => $("fileInput").click();
+$("fileInput").onchange = (e) => uploadFiles(e.target.files);
+["dragenter", "dragover"].forEach((ev) => $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
+
+async function uploadFiles(files) {
+  for (const file of files) {
+    const row = document.createElement("div");
+    row.className = "upload";
+    row.innerHTML = `<div>${esc(file.name)} <span class="muted"></span></div><div class="bar"><div></div></div>`;
+    $("uploads").append(row);
+    try {
+      const info = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", `/api/upload/${encodeURIComponent(file.name)}`);
+        xhr.upload.onprogress = (e) => {
+          if (!e.lengthComputable) return;
+          row.querySelector(".bar div").style.width = `${e.loaded / e.total * 100}%`;
+          row.querySelector("span").textContent = `${Math.round(e.loaded / e.total * 100)}%`;
+        };
+        xhr.onload = () => {
+          const data = JSON.parse(xhr.responseText || "{}");
+          xhr.status < 300 ? resolve(data) : reject(new Error(data.error || xhr.statusText));
+        };
+        xhr.onerror = () => reject(new Error("upload failed"));
+        xhr.send(file);
+      });
+      row.remove();
+      await loadMedia();
+      if (!info.error && !AUDIO_EXT.test(info.name)) addClip(info);
+    } catch (err) {
+      row.querySelector("span").textContent = "failed";
+      toast(`${file.name}: ${err.message}`);
+    }
+  }
+  $("fileInput").value = "";
+}
+
+// ---------- timeline ----------
+let clipIds = new WeakMap(), nextId = 1;
+const idOf = (c) => { if (!clipIds.has(c)) clipIds.set(c, nextId++); return clipIds.get(c); };
+
+function renderTimeline() {
+  if (!project) return;
+  const tl = $("timeline");
+  let total = 0, unknown = false;
+  project.clips.forEach((c) => { const d = clipDuration(c); d == null ? unknown = true : total += d; });
+  $("runtime").textContent = fmt(total) + (unknown ? "+" : "");
+  $("clipCount").textContent = `${project.clips.length} clip${project.clips.length === 1 ? "" : "s"}`;
+  if (!project.clips.length) {
+    tl.innerHTML = `<div class="empty">Add videos from the library, or drop files on the left.<br>
+      Clips play top to bottom. Drag them to reorder.</div>`;
+    return;
+  }
+  let t = 0;
+  tl.innerHTML = project.clips.map((c, i) => {
+    const m = mediaFor(c.path), d = clipDuration(c), at = t;
+    t += d || 0;
+    const missing = c.type !== "title" && !m;
+    const name = c.type === "title" ? (c.text || "Title").split("\n")[0] : nameOf(c.path);
+    const thumb = c.type === "title"
+      ? `<div class="thumb" style="background:${esc(c.background)};color:${esc(c.color)};font-size:11px">Aa</div>`
+      : AUDIO_EXT.test(c.path || "") ? `<div class="thumb">♪</div>`
+      : `<div class="thumb" style="background-image:url('/api/thumb/${enc(nameOf(c.path))}')"></div>`;
+    const chips = [
+      c.type === "title" ? `<span class="chip">title</span>` : "",
+      c.chapter ? `<span class="chip">§ ${esc(c.chapter)}</span>` : "",
+      missing ? `<span class="chip warn">missing file</span>` : "",
+      c.start || c.end != null ? `<span class="chip">trimmed</span>` : "",
+      c.fade_in || c.fade_out ? `<span class="chip">fade</span>` : "",
+      c.mute ? `<span class="chip">muted</span>` : "",
+    ].join("");
+    return `<div class="clip ${open.has(idOf(c)) ? "open" : ""}" draggable="true" data-i="${i}">
+      <div class="clip-head" data-toggle="${i}">
+        <div class="handle" title="Drag to reorder">⋮⋮</div>
+        <div class="num">${i + 1}</div>${thumb}
+        <div class="clip-title"><div class="name">${esc(name)}</div>
+          <div class="meta">starts ${fmt(at)} ${chips}</div></div>
+        <div class="clip-dur">${fmt(d)}</div>
+        <div class="clip-buttons">
+          <button class="small" data-up="${i}" title="Move up">↑</button>
+          <button class="small" data-down="${i}" title="Move down">↓</button>
+          <button class="small" data-dup="${i}" title="Duplicate">⧉</button>
+          <button class="small danger" data-rm="${i}" title="Remove from timeline">✕</button>
+        </div>
+      </div>
+      <div class="clip-body">${clipForm(c, i, m)}</div>
+    </div>`;
+  }).join("");
+}
+
+function field(i, key, label, value, attrs = "", wide = false) {
+  return `<label class="f ${wide ? "wide" : ""}">${label}<input data-f="${key}" data-i="${i}" value="${esc(value ?? "")}" ${attrs}></label>`;
+}
+function clipForm(c, i, m) {
+  const num = 'type="number" step="0.1" min="0"';
+  let html = `<div class="grid">`;
+  if (c.type === "title") {
+    html += `<label class="f wide">Text (new line = new line)<textarea data-f="text" data-i="${i}" rows="2">${esc(c.text)}</textarea></label>`;
+    html += field(i, "duration", "Seconds", c.duration ?? 4, num);
+    html += field(i, "font_size", "Text size (auto)", c.font_size, 'type="number" min="8"');
+    html += field(i, "color", "Text colour", c.color);
+    html += field(i, "background", "Background", c.background);
+  } else if (c.type === "image" || m?.is_image) {
+    html += field(i, "duration", "Seconds", c.duration ?? 5, num);
+  } else {
+    html += field(i, "start", "Start at (s)", c.start || "", num + ' placeholder="0"');
+    html += field(i, "end", `End at (s)${m?.duration ? ` / ${m.duration.toFixed(1)}` : ""}`, c.end, num + ' placeholder="end"');
+    html += field(i, "volume", "Volume", c.volume, 'type="number" step="0.1" min="0"');
+    html += `<label class="check" style="align-self:end"><input type="checkbox" data-f="mute" data-i="${i}" ${c.mute ? "checked" : ""}> Mute</label>`;
+  }
+  html += field(i, "fade_in", "Fade in (s)", c.fade_in || "", num + ' placeholder="0"');
+  html += field(i, "fade_out", "Fade out (s)", c.fade_out || "", num + ' placeholder="0"');
+  html += field(i, "chapter", "Chapter name", c.chapter, 'placeholder="none"', true);
+  html += `</div>`;
+  if (c.type !== "title" && m) html += `<div style="margin-top:8px"><button class="small" data-preview="${i}">▶ Preview from start point</button></div>`;
+  return html;
+}
+
+const NUMERIC = new Set(["start", "end", "duration", "fade_in", "fade_out", "volume", "font_size"]);
+$("timeline").addEventListener("input", (e) => {
+  const el = e.target, key = el.dataset.f; if (!key) return;
+  const c = project.clips[+el.dataset.i];
+  let v = el.type === "checkbox" ? el.checked : el.value;
+  if (NUMERIC.has(key)) v = v === "" ? (["start", "fade_in", "fade_out"].includes(key) ? 0 : key === "volume" ? 1 : null) : Number(v);
+  else if (key !== "mute" && v === "" && key !== "text") v = key === "color" ? "white" : key === "background" ? "black" : null;
+  c[key] = v;
+  changed();
+  clearTimeout(renderTimeline.t);
+  renderTimeline.t = setTimeout(() => {
+    // re-render without stealing focus from the field being typed in
+    const focusKey = document.activeElement?.dataset?.f, focusI = document.activeElement?.dataset?.i;
+    const pos = document.activeElement?.selectionStart;
+    renderTimeline();
+    const again = document.querySelector(`[data-f="${focusKey}"][data-i="${focusI}"]`);
+    if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch {} }
+  }, 700);
+});
+$("timeline").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (b) {
+    e.stopPropagation();
+    const clips = project.clips;
+    if (b.dataset.rm != null) clips.splice(+b.dataset.rm, 1);
+    else if (b.dataset.dup != null) clips.splice(+b.dataset.dup + 1, 0, structuredClone(clips[+b.dataset.dup]));
+    else if (b.dataset.up != null && +b.dataset.up > 0) { const i = +b.dataset.up; [clips[i - 1], clips[i]] = [clips[i], clips[i - 1]]; }
+    else if (b.dataset.down != null && +b.dataset.down < clips.length - 1) { const i = +b.dataset.down; [clips[i + 1], clips[i]] = [clips[i], clips[i + 1]]; }
+    else if (b.dataset.preview != null) { const c = clips[+b.dataset.preview]; preview(c.path, c.start || 0); return; }
+    else return;
+    changed(); renderTimeline(); return;
+  }
+  const head = e.target.closest("[data-toggle]");
+  if (head && !e.target.closest("input")) {
+    const id = idOf(project.clips[+head.dataset.toggle]);
+    open.has(id) ? open.delete(id) : open.add(id);
+    head.parentElement.classList.toggle("open");
+  }
+});
+// drag to reorder
+let dragFrom = null;
+$("timeline").addEventListener("dragstart", (e) => {
+  const el = e.target.closest(".clip"); if (!el || e.target.closest("input,textarea")) return;
+  dragFrom = +el.dataset.i; el.classList.add("dragging"); e.dataTransfer.effectAllowed = "move";
+});
+$("timeline").addEventListener("dragover", (e) => {
+  const el = e.target.closest(".clip"); if (dragFrom == null || !el) return;
+  e.preventDefault();
+  document.querySelectorAll(".drop-before,.drop-after").forEach((x) => x.classList.remove("drop-before", "drop-after"));
+  const r = el.getBoundingClientRect();
+  el.classList.add(e.clientY < r.top + r.height / 2 ? "drop-before" : "drop-after");
+});
+$("timeline").addEventListener("drop", (e) => {
+  const el = e.target.closest(".clip"); if (dragFrom == null || !el) return;
+  e.preventDefault();
+  let to = +el.dataset.i + (el.classList.contains("drop-after") ? 1 : 0);
+  const [moved] = project.clips.splice(dragFrom, 1);
+  if (to > dragFrom) to--;
+  project.clips.splice(to, 0, moved);
+  dragFrom = null; changed(); renderTimeline();
+});
+$("timeline").addEventListener("dragend", () => { dragFrom = null; renderTimeline(); });
+
+$("addTitle").onclick = () => {
+  project.clips.push({ type: "title", path: null, text: project.output.title || "Title", duration: 4,
+    start: 0, end: null, fade_in: 0.5, fade_out: 0.5, volume: 1, mute: false, chapter: null,
+    font_size: null, color: "white", background: "black" });
+  open.add(idOf(project.clips.at(-1)));
+  changed(); renderTimeline();
+};
+$("expandAll").onclick = () => {
+  const all = project.clips.every((c) => open.has(idOf(c)));
+  project.clips.forEach((c) => all ? open.delete(idOf(c)) : open.add(idOf(c)));
+  $("expandAll").textContent = all ? "Expand all" : "Collapse all";
+  renderTimeline();
+};
+$("clearAll").onclick = () => {
+  if (project.clips.length && confirm("Remove every clip from the timeline? (Files stay in the library.)")) {
+    project.clips = []; changed(); renderTimeline();
+  }
+};
+function preview(path, start) {
+  const v = $("preview"); v.hidden = false;
+  v.src = `/${enc(path)}#t=${start}`; v.play().catch(() => {});
+}
+
+// ---------- output settings ----------
+function renderMusicSelect() {
+  const sel = $("music"), current = project?.music?.path || "";
+  const opts = media.filter((m) => !m.error && !m.is_image && m.has_audio);
+  sel.innerHTML = `<option value="">None</option>` + opts.map((m) =>
+    `<option value="${esc(m.path)}">${esc(m.name)}</option>`).join("");
+  if (current && !opts.some((m) => m.path === current)) sel.innerHTML += `<option value="${esc(current)}">${esc(nameOf(current))} (missing)</option>`;
+  sel.value = current;
+}
+function syncForm() {
+  const o = project.output;
+  $("title").value = o.title || "";
+  const size = `${o.width}x${o.height}`;
+  const known = [...$("size").options].some((op) => op.value === size);
+  $("size").value = known ? size : "custom";
+  $("customSize").hidden = known;
+  $("width").value = o.width; $("height").value = o.height;
+  if (![...$("fps").options].some((op) => op.value === String(o.fps))) $("fps").add(new Option(o.fps));
+  $("fps").value = String(o.fps);
+  $("fit").value = o.fit;
+  if (![...$("crf").options].some((op) => op.value === String(o.crf))) $("crf").add(new Option(`CRF ${o.crf}`, o.crf));
+  $("crf").value = String(o.crf);
+  if (![...$("preset").options].some((op) => op.value === o.preset)) $("preset").add(new Option(o.preset));
+  $("preset").value = o.preset;
+  $("chapters").value = project.chapters;
+  $("loudnorm").checked = !!o.loudnorm;
+  renderMusicSelect();
+  $("musicOpts").hidden = !project.music;
+  if (project.music) { $("musicVolume").value = project.music.volume; $("musicDuck").checked = project.music.duck; }
+}
+function readForm() {
+  const o = project.output;
+  o.title = $("title").value.trim() || null;
+  if ($("size").value === "custom") { o.width = +$("width").value; o.height = +$("height").value; }
+  else [o.width, o.height] = $("size").value.split("x").map(Number);
+  o.fps = $("fps").value; o.fit = $("fit").value; o.crf = +$("crf").value; o.preset = $("preset").value;
+  o.loudnorm = $("loudnorm").checked;
+  project.chapters = $("chapters").value;
+  const mp = $("music").value;
+  if (!mp) project.music = null;
+  else {
+    if (!project.music || project.music.path !== mp) project.music = { path: mp, volume: 0.25, duck: true, fade_out: 3 };
+    else {
+      project.music.volume = +$("musicVolume").value;
+      project.music.duck = $("musicDuck").checked;
+    }
+  }
+}
+["title", "size", "width", "height", "fps", "fit", "crf", "preset", "chapters", "loudnorm", "music", "musicVolume", "musicDuck"]
+  .forEach((id) => $(id).addEventListener("input", () => {
+    readForm();
+    if (id === "size") { $("customSize").hidden = $("size").value !== "custom"; }
+    if (id === "music") syncForm();
+    changed();
+  }));
+
+// ---------- saving ----------
+function changed() {
+  $("saveState").textContent = "Unsaved…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 600);
+}
+async function save() {
+  clearTimeout(saveTimer);
+  try {
+    await api("/api/project", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(project) });
+    $("saveState").textContent = "Saved";
+  } catch (err) {
+    $("saveState").textContent = "Not saved";
+    $("saveState").title = err.message;
+  }
+}
+
+// ---------- rendering ----------
+let polling = null;
+$("renderBtn").onclick = async () => {
+  readForm();
+  if (!project.clips.length) return toast("Add some clips to the timeline first.");
+  const filename = $("filename").value.trim() || (project.output.title || "longform").replace(/[^\w\- ]+/g, "_") + ".mp4";
+  try {
+    await api("/api/render", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...project, filename }) });
+    $("saveState").textContent = "Saved";
+    $("result").hidden = true;
+    pollRender();
+  } catch (err) { toast(err.message); }
+};
+$("cancelBtn").onclick = () => api("/api/render/cancel", { method: "POST" });
+
+async function pollRender() {
+  clearTimeout(polling);
+  const job = await api("/api/render").catch(() => null);
+  if (!job || job.status === "idle") return;
+  const running = job.status === "running";
+  $("renderBtn").disabled = running;
+  $("renderBtn").textContent = running ? "Rendering…" : "Render video";
+  $("cancelBtn").hidden = !running;
+  $("progressBar").style.width = `${(job.progress || 0) * 100}%`;
+  const msg = $("renderMsg");
+  msg.className = job.status === "error" ? "error" : "";
+  let eta = "";
+  if (running && job.progress > 0.02) {
+    const elapsed = Date.now() / 1000 - job.started;
+    eta = ` · about ${fmt(elapsed / job.progress - elapsed)} left`;
+  }
+  msg.textContent = job.status === "error" ? job.error : `${Math.round((job.progress || 0) * 100)}% · ${job.message}${eta}`;
+  if (running) { polling = setTimeout(pollRender, 700); return; }
+  if (job.status === "done" && job.output) {
+    $("result").hidden = false;
+    $("resultVideo").src = `/${enc(job.output)}?v=${job.id}`;
+    $("downloadLink").href = `/${enc(job.output)}?download=1`;
+    $("chaptersBox").hidden = !job.chapters;
+    $("chaptersText").value = job.chapters || "";
+  }
+  loadRenders();
+}
+async function loadRenders() {
+  const list = await api("/api/renders").catch(() => []);
+  $("renders").innerHTML = list.length ? list.map((r) => `<div class="render-item">
+      <a href="/${enc(r.path)}" target="_blank" title="${esc(r.name)}">${esc(r.name)}</a>
+      <span class="muted">${(r.size / 1e6).toFixed(1)} MB</span>
+      <a href="/${enc(r.path)}?download=1" style="flex:0"><button class="small">⤓</button></a>
+      <button class="small danger" data-delrender="${esc(r.name)}">✕</button></div>`).join("")
+    : `<span class="muted">None yet</span>`;
+}
+$("renders").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-delrender]"); if (!b) return;
+  if (!confirm(`Delete ${b.dataset.delrender}?`)) return;
+  await api(`/api/renders/${encodeURIComponent(b.dataset.delrender)}`, { method: "DELETE" });
+  loadRenders();
+});
+
+// ---------- start ----------
+(async function init() {
+  project = await api("/api/project");
+  syncForm();
+  await loadMedia();
+  loadRenders();
+  pollRender();
+  window.addEventListener("beforeunload", (e) => { if ($("saveState").textContent === "Unsaved…") { save(); } });
+})().catch((err) => toast(err.message));
+</script>
+</body>
+</html>
