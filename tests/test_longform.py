@@ -272,8 +272,9 @@ class CaptionTests(MediaTestCase):
     def test_real_speech_recognition(self):
         result = captions.whisper_transcribe(self.dir / "talk.mp4", model="tiny")
         text = " ".join(l["text"] for l in result["lines"]).lower()
-        self.assertIn("welcome", text)
-        self.assertIn("caption", text)
+        self.assertIn("welcome", text)  # the 4s test clip cuts the sentence off after "testing"
+        self.assertIn("channel", text)
+        self.assertTrue(all(l["end"] > l["start"] for l in result["lines"]))
 
 
 class TransitionTests(MediaTestCase):
