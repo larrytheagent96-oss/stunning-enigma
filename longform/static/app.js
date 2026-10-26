@@ -276,7 +276,8 @@ function renderTopbar() {
 }
 
 function renderAll() {
-  renderTopbar(); renderTabs(); renderPanel(); renderInspector(); renderPlayer(); renderTimeline();
+  renderTopbar(); renderTabs(); renderPanel(); renderInspector(); renderPlayer();
+  if (S.autoFit) fitTimeline(); else renderTimeline();
   $("saveState").textContent = "All changes saved";
 }
 
@@ -901,8 +902,8 @@ function renderInspector() {
         ${S.catalog.transition_styles.map((s) => `<option value="${s}" ${c.transition_style === s ? "selected" : ""}>${STYLE_NAMES[s] || s}</option>`).join("")}</select></div>`;
   }
   body += `<div class="section"><div class="section-title">Fade from / to black</div>
-    <div class="grid2"><label class="field"><span>Fade in</span>${slider("c.fade_in", c.fade_in, 0, 3, 0.1)}</label>
-    <label class="field"><span>Fade out</span>${slider("c.fade_out", c.fade_out, 0, 3, 0.1)}</label></div></div>
+    <label class="field"><span>Fade in</span>${slider("c.fade_in", c.fade_in, 0, 3, 0.1)}</label>
+    <label class="field"><span>Fade out</span>${slider("c.fade_out", c.fade_out, 0, 3, 0.1)}</label></div>
     <div class="section"><div class="section-title">${icon("bookmark", "sm")} Chapter</div>
     <input type="text" data-bind="c.chapter" data-kind="maybe-text" placeholder="e.g. Day 1: arriving" value="${esc(c.chapter || "")}"></div>
     <div class="actions">

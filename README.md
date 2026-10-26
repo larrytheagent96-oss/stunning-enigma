@@ -1,147 +1,160 @@
-# longform
+# Longform
 
-Put any videos together into one long-form video.
+**Put any videos together into one long video.** Phone clips, camera footage, screen recordings,
+photos and music, in any format, size, frame rate or orientation, become one finished video with
+transitions, captions, music and chapters. Made for YouTubers and creators.
 
-Drop in clips from anywhere: phone videos, screen recordings, camera footage, GIFs,
-photos, voice memos. They can have different resolutions, frame rates, orientations,
-codecs, or no sound at all. longform turns them into one clean video with title
-cards, crossfade transitions, fades, background music and chapters. You can use it from the command line
-or from a drag-and-drop editor in your browser.
+Everything runs on your computer. Your videos are never uploaded or copied anywhere.
 
-## Requirements
+## Download
 
-- Python 3.10+
-- [FFmpeg](https://ffmpeg.org/download.html) (`ffmpeg` and `ffprobe` on your PATH)
+Get the latest app from the [Releases page](https://github.com/larrytheagent96-oss/stunning-enigma/releases).
+Builds for every change are also under **Actions → Desktop app → (latest run) → Artifacts**.
 
-No other dependencies.
+| Your computer | Download | First launch |
+| --- | --- | --- |
+| Windows 10 / 11 | `Longform-Windows.zip` | Unzip it, open the `Longform` folder and double-click **Longform.exe**. If Windows shows "Windows protected your PC", click **More info → Run anyway** (the app isn't signed with a paid certificate yet). |
+| Mac with Apple Silicon (M1 or newer) | `Longform-macOS-AppleSilicon.dmg` | Open the .dmg and drag **Longform** into Applications. The first time, macOS may say it can't check the app: open **System Settings → Privacy & Security** and click **Open Anyway**. |
+
+FFmpeg and the speech-recognition engine are built in, so there's nothing else to install.
+
+## How to make a video
+
+The app walks you through four steps along the left side.
+
+1. **Media.** Click **Add videos, photos & music**, or drag files onto the window. They stay where
+   they are on your computer. Your first clips go straight onto the timeline.
+2. **Arrange.** On the timeline at the bottom:
+   - drag a clip to **reorder** it
+   - drag a clip's **left or right edge to trim** it
+   - click a clip to change it on the right: trim exactly, volume, mute, fades, chapter name, or a
+     different transition
+   - click the badge between two clips to change that transition
+   - press **Preview** (top right) to watch everything together with transitions, music and captions
+3. **Style.** Pick a one-click look:
+
+   | Look | What it does |
+   | --- | --- |
+   | Vlog | Quick crossfades, music under your voice, a chapter per clip |
+   | Podcast / talking head | Straight cuts, even loudness, clean captions |
+   | Tutorial | Cuts with boxed captions that stay readable over screen recordings |
+   | Shorts energy | Fast slide transitions and big bold captions |
+   | Cinematic | Slow dips to black, fades at the very start and end |
+   | Photo slideshow | Gentle dissolves, four seconds per photo, music up front |
+   | Simple cuts | Just your clips, back to back |
+
+   Then fine-tune transitions (25 styles), background music (which automatically gets quieter when
+   people talk), even loudness and chapters.
+4. **Captions.** Switch on **Add captions to my video** and pick a look (Clean, Bold pop or Boxed)
+   and a size. Speech is turned into text on your computer. The first time, a speech model of about
+   150 MB is downloaded. Click **Edit** next to a clip to fix any words, then press **Save captions**.
+5. **Export.** Choose where it's going: YouTube, YouTube 4K, Shorts / TikTok / Reels (vertical),
+   Instagram post, Square or Quick share (a small file). Then choose a quality and press **Export video**.
+   The finished video is saved in your **Videos/Longform** folder (Movies/Longform on a Mac). You can
+   change the folder. With it you also get:
+   - a chapter list to paste into your YouTube description
+   - a `.srt` captions file you can upload to YouTube for subtitles viewers can switch on and off
+
+**Projects.** Click the grid button at the top left to switch projects, start a new one (optionally
+from a look), duplicate a project or delete one. Everything saves automatically.
+
+**Shortcuts:** <kbd>Space</kbd> play/pause · <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> undo ·
+<kbd>Ctrl/⌘</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo · <kbd>Delete</kbd> remove clip ·
+<kbd>Ctrl/⌘</kbd>+<kbd>D</kbd> duplicate · <kbd>←</kbd>/<kbd>→</kbd> previous/next clip.
+
+## Good to know
+
+- **Long videos are fine.** Each clip is converted once and remembered. When you change one clip,
+  only that clip is redone, and the final join copies the video without re-encoding it. Sound and
+  picture stay in sync over hours of footage.
+- **Any format.** If the preview window can't play a format directly (for example some HEVC,
+  ProRes or AVI files), the app quietly makes a small preview copy. Your export always uses the original.
+- **Clips with different shapes** (vertical phone video in a landscape export, for example) get black
+  bars, or are cropped to fill if you choose **Crop to fill** in Export.
+- **Moved a file?** The clip shows as missing. Add the file again from its new place.
+
+## For developers
+
+Requires Python 3.10+ and [FFmpeg](https://ffmpeg.org/download.html) on your PATH.
 
 ```bash
-pip install .          # installs the `longform` command
-# or run it without installing:
-python -m longform --help
+pip install ".[app]"     # the desktop window and the captions engine
+longform app             # open the desktop app
+longform ui              # or open the editor in your browser
 ```
 
-## The editor
+### Command line
 
 ```bash
-longform ui
-```
-
-This opens `http://localhost:8765` with three panels:
-
-- **Library**: drop files to upload them. Each file shows a thumbnail, length, size and whether it has sound.
-- **Timeline**: clips play top to bottom. Drag them, or use ↑/↓, to reorder. Click a clip to trim it,
-  add fades, change the volume, mute it, give it a chapter name, or set its own transition from the
-  previous clip. Use **+ Title card** to add text screens.
-  The running total length is shown at the top.
-- **Output**: choose the size (4K, 1080p, 720p, vertical, square or custom), frame rate, how to handle
-  clips with a different shape (black bars, crop or stretch), quality, crossfade transitions between
-  clips (length and style), background music and loudness
-  normalisation. Then click **Render video**. You get progress with an estimated time left, a preview,
-  a download button, and a chapter list you can paste into a YouTube description.
-
-Everything is stored in a workspace folder (`./longform-workspace` by default; change it with
-`--workspace`): `media/` holds your files, `renders/` holds finished videos, and `project.json` holds the timeline.
-The project saves automatically.
-
-## Command line
-
-Join files or whole folders in one go. Folders are sorted by name, so `clip2` comes before `clip10`:
-
-```bash
-longform join intro.mp4 ./day1 ./day2 outro.mov -o vlog.mp4
-longform join ./footage -o film.mp4 --title "Summer 2026" --fade 0.5 --chapters \
-    --music soundtrack.mp3 --size 1080p --fps 30
-longform join ./footage -o film.mp4 --crossfade 1 --transition dissolve
-```
-
-`--crossfade SECONDS` blends every clip into the next. `--transition` picks the style: `fade` (default),
-`dissolve`, `fadeblack`, `fadewhite`, `wipeleft`/`right`/`up`/`down`, `slideleft`/`right`/`up`/`down`,
-`smoothleft`/`right`/`up`/`down`, `circleopen`, `circleclose`, `circlecrop`, `rectcrop`, `radial`,
-`pixelize`, `distance`, `hblur` or `zoomin`.
-
-For more control, write a project file, edit it, then render it:
-
-```bash
-longform init ./footage -o film.json
+longform join ./footage -o film.mp4 --template vlog --export youtube --music song.mp3
+longform join intro.mp4 ./day1 ./day2 -o trip.mp4 --crossfade 1 --transition dissolve --chapters
+longform join ./talk -o podcast.mp4 --captions --caption-style boxed     # needs faster-whisper
+longform init ./footage -o film.json   # write a project file to edit, then:
 longform render film.json -o film.mp4 --jobs 4
+longform probe ./footage               # length, size, frame rate and sound of each file
 ```
 
-Other commands:
+`--template` takes `vlog`, `podcast`, `tutorial`, `shorts`, `cinematic`, `slideshow` or `simple`.
+`--export` takes `youtube`, `youtube-4k`, `shorts`, `instagram`, `square` or `small`. Individual
+options like `--size`, `--crf` and `--crossfade` override them. Folders are sorted naturally
+(`clip2` before `clip10`).
 
-```bash
-longform probe ./footage        # length, size, frame rate and audio of each file, plus the total
-longform ui --port 9000 --workspace ~/Videos/project
-```
-
-### Project file
+### Project files
 
 ```json
 {
-  "output": { "width": 1920, "height": 1080, "fps": "30", "fit": "contain",
-              "crf": 20, "preset": "medium", "loudnorm": true, "title": "My film" },
-  "chapters": "marked",
-  "transition": 1,
-  "transition_style": "fade",
-  "music": { "path": "music/theme.mp3", "volume": 0.25, "duck": true, "fade_out": 3 },
+  "name": "Summer trip",
+  "output": { "width": 1920, "height": 1080, "fps": "30", "fit": "contain", "crf": 20, "loudnorm": true },
+  "transition": 0.5, "transition_style": "fade", "chapters": "marked",
+  "music": { "path": "music/theme.mp3", "volume": 0.25, "duck": true },
+  "captions": { "enabled": true, "style": "clean", "size": "medium", "model": "base" },
   "clips": [
-    { "type": "title", "text": "My film\nPart one", "duration": 4, "fade_in": 1, "chapter": "Intro" },
-    { "path": "footage/a.mp4", "start": 12.5, "end": 95, "fade_out": 0.5, "chapter": "The trip" },
+    { "type": "title", "text": "Summer trip\n2026", "duration": 4, "chapter": "Intro" },
+    { "path": "footage/a.mp4", "start": 12.5, "end": 95, "chapter": "Day 1" },
     { "path": "footage/b.mov", "volume": 0.6, "transition": 2, "transition_style": "wipeleft" },
-    { "path": "footage/c.mp4", "mute": true },
-    { "path": "photos/sunset.jpg", "duration": 6, "transition": 0 },
-    "footage/d.mkv"
+    { "path": "footage/c.mp4", "mute": true, "captions": false },
+    { "path": "photos/sunset.jpg", "duration": 6, "transition": 0 }
   ]
 }
 ```
 
-Paths are relative to the project file. A clip can be just a path string.
+Paths are relative to the project file.
 
 | Clip field | Meaning |
 | --- | --- |
-| `type` | `video`, `image` or `title`. Detected from the file extension when left out. |
-| `start`, `end` | Trim points in seconds (video). |
-| `duration` | How long to show an image or title card. For a video, it caps the length. |
+| `start`, `end` | Trim points in seconds. |
+| `duration` | How long to show a photo or title card. For a video, it caps the length. |
 | `text`, `font_size`, `color`, `background` | Title card text and style. |
-| `fade_in`, `fade_out` | Fade from or to black and silence, in seconds. Only applies to an edge that isn't crossfading. |
-| `transition`, `transition_style` | Crossfade from the previous clip into this one. Overrides the project default; `0` makes a straight cut. |
-| `volume`, `mute` | Clip audio level. |
+| `fade_in`, `fade_out` | Fade from or to black. Only applies to an edge without a crossfade. |
+| `transition`, `transition_style` | Crossfade into this clip; overrides the project default (`0` = cut). |
+| `volume`, `mute`, `captions` | Sound level, silence the clip, leave it out of captions. |
 | `chapter` | Starts a chapter here. |
 
-| Setting | Meaning |
-| --- | --- |
-| `output.fit` | `contain` adds black bars, `cover` crops to fill, `stretch` distorts to fit. |
-| `output.crf` / `preset` | x264 quality (lower is better) and speed. |
-| `output.loudnorm` | Normalise loudness to −16 LUFS, the usual level for online video. |
-| `transition` / `transition_style` | Default crossfade between clips, in seconds (`0` = straight cuts), and its style. |
-| `chapters` | `marked` adds chapters only for clips with a `chapter` name, `clips` adds one per clip, `none` adds none. |
-| `music.duck` | Lower the music automatically while the clips have sound. |
+### How rendering works
 
-## How it handles long videos
+The timeline is cut into pieces: the body of each clip, plus a short piece for each crossfade, made from
+the end of one clip and the start of the next. Every piece is encoded to the same size, frame rate and
+audio format, with lengths snapped to whole frames, and cached. Captions are burned into the pieces
+they appear in. The pieces are then joined without re-encoding the video, and only the audio (music,
+loudness) is mixed once at the end.
 
-1. Each clip is converted once into a standard segment: same size, frame rate, pixel format and
-   48 kHz stereo audio. Clips without sound get silence, so audio and video stay in sync.
-2. Segments are cached in `.longform-cache` (next to the output; the editor keeps them in its
-   workspace). If you change one clip in a two-hour project, only that clip is re-encoded.
-   Clips used more than once are encoded once. Use `--jobs` to encode several clips in parallel.
-   A crossfade becomes its own short segment, made from the end of one clip and the start of the
-   next. Each clip's own segment is shortened by the overlap, so changing a transition only re-encodes
-   that transition. A clip gives at most half its length to each neighbour, so short clips get
-   shorter transitions.
-3. All lengths are snapped to whole video frames, so every segment's audio is exactly as long as its
-   video. Across hundreds of clips and transitions the sound stays in sync.
-4. The segments are joined without re-encoding the video. Only the audio is mixed (with music and
-   loudness, if set) and encoded once, so the final step is fast and audio doesn't drift over long runs.
-5. Chapters start where each clip begins to appear. They are written into the MP4/MKV and also saved as `<output>.chapters.txt` with YouTube-style timestamps.
+### Building the desktop app
 
-The cache can take a lot of disk space for long projects. `longform render --no-cache` deletes it
-afterwards. `longform join` deletes it by default; pass `--keep-cache` to keep it.
+`.github/workflows/desktop-app.yml` does this on every push: it runs the tests (including real speech
+recognition), builds the Windows and macOS apps with PyInstaller, runs each packaged app's
+`--self-test --speech`, and uploads the installers. Pushing a tag like `v1.0.0` publishes them as a release.
+To build locally, put `ffmpeg` and `ffprobe` in `packaging/ffmpeg/`, then run
+`pyinstaller packaging/longform.spec --noconfirm`.
 
-## Tests
+### Tests
 
 ```bash
 python -m unittest discover -s tests -v
+LONGFORM_TEST_WHISPER=1 python -m unittest discover -s tests   # also run the real speech model
 ```
 
-The tests generate their own media with FFmpeg and cover rendering, trimming, crossfades, caching,
-music, cancellation, the CLI and the editor's HTTP API.
+### Licenses
+
+Longform bundles the [Inter](https://github.com/rsms/inter) font (SIL Open Font License, see
+`longform/fonts/OFL.txt`). The packaged apps include FFmpeg builds licensed under the GPL, and
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT).
