@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a release with this tag, e.g. v0.1.0 (leave empty to only build)"
+        required: false
+        default: ""
 
 permissions:
   contents: write  # lets a version tag publish a release
@@ -122,7 +127,7 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -132,5 +137,18 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          # A tag push names the release itself; a manual run creates the tag on the built commit.
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Longform ${{ inputs.release_tag || github.ref_name }}
           files: artifacts/*
           generate_release_notes: true
+          body: |
+            **Put any videos together into one long video**, with transitions, captions, music and chapters.
+
+            | Your computer | Download |
+            | --- | --- |
+            | Windows 10 / 11 | **Longform-Windows.zip**: unzip it, then run `Longform.exe`. If Windows warns you, click *More info → Run anyway*. |
+            | Mac with Apple Silicon (M1 or newer) | **Longform-macOS-AppleSilicon.dmg**: drag Longform into Applications. The first time, open *System Settings → Privacy & Security* and click *Open Anyway*. |
+
+            FFmpeg and the speech-recognition engine are built in. Captions download a speech model (about 150 MB) the first time you use them. See the [user guide](https://github.com/${{ github.repository }}#how-to-make-a-video).
