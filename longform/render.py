@@ -241,7 +241,8 @@ def _clip_duration(i: int, clip: Clip, info: MediaInfo | None) -> float:
 
 @functools.cache
 def _drawtext_has_align() -> bool:
-    result = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=drawtext"], capture_output=True, text=True)
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=drawtext"], capture_output=True, text=True,
+                            **ffmpeg.NO_WINDOW)
     return "text_align" in result.stdout
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -11,6 +12,10 @@ from pathlib import Path
 from typing import Callable
 
 from .project import IMAGE_EXTENSIONS
+
+
+# On Windows, stop every FFmpeg call from flashing up a console window in the desktop app.
+NO_WINDOW: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 
 class FFmpegError(RuntimeError):
@@ -60,7 +65,7 @@ def probe(path: str | Path) -> MediaInfo:
         raise FFmpegError(f"file not found: {path}")
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, **NO_WINDOW,
     )
     if result.returncode != 0:
         raise FFmpegError(f"cannot read {path}: {result.stderr.strip() or 'ffprobe failed'}")
@@ -125,7 +130,8 @@ def run(
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", *args]
     stderr_lines: list[str] = []
     cancelled = threading.Event()
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd) as proc:
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd,
+                          **NO_WINDOW) as proc:
         stderr_thread = threading.Thread(target=lambda: stderr_lines.extend(proc.stderr), daemon=True)
         stderr_thread.start()
         if cancel is not None:

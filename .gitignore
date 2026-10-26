@@ -5,3 +5,4 @@ dist/
 .longform-cache/
 longform-workspace/
 *.partial.*
+packaging/ffmpeg/

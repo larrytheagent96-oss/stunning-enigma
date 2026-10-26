@@ -212,6 +212,11 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_app(args: argparse.Namespace) -> int:
+    from .desktop import run_app
+    return run_app(Path(args.workspace) if args.workspace else None)
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     from .server import serve
     serve(Path(args.workspace), host=args.host, port=args.port, open_browser=not args.no_browser)
@@ -262,6 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("probe", help="show length, size and audio of media files")
     p.add_argument("inputs", nargs="+")
     p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser("app", help="open the desktop app")
+    p.add_argument("--workspace", help="where projects and settings are kept")
+    p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("ui", help="open the editor in your browser")
     p.add_argument("--workspace", default="longform-workspace", help="folder for media, project and renders")

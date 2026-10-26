@@ -10,11 +10,17 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+app = ["pywebview>=5", "faster-whisper>=1.0"]
+
 [project.scripts]
 longform = "longform.cli:main"
+
+[project.gui-scripts]
+longform-app = "longform.desktop:main"
 
 [tool.setuptools]
 packages = ["longform"]
 
 [tool.setuptools.package-data]
-longform = ["static/*"]
+longform = ["static/*", "fonts/*"]

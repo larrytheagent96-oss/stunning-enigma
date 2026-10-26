@@ -292,7 +292,8 @@ class Workspace:
             else:
                 at = 0 if info.get("is_image") else min(1.0, (info.get("duration") or 0) / 3)
                 cmd = ["-ss", f"{at:.2f}", "-i", str(source), "-frames:v", "1", "-vf", "scale=320:-2"]
-            subprocess.run(["ffmpeg", "-v", "error", "-y", *cmd, "-q:v", "4", str(out)], capture_output=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", *cmd, "-q:v", "4", str(out)], capture_output=True,
+                           **ffmpeg.NO_WINDOW)
         return self._cached_image(mid, "thumb", make)
 
     def filmstrip(self, mid: str) -> Path:
@@ -314,7 +315,8 @@ class Workspace:
                 graph = ";".join(labels) + ";" + "".join(f"[f{n}]" for n in range(FILMSTRIP_FRAMES)) + \
                     f"hstack=inputs={FILMSTRIP_FRAMES}"
                 cmd = [*inputs, "-filter_complex", graph, "-frames:v", "1"]
-            subprocess.run(["ffmpeg", "-v", "error", "-y", *cmd, "-q:v", "5", str(out)], capture_output=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", *cmd, "-q:v", "5", str(out)], capture_output=True,
+                           **ffmpeg.NO_WINDOW)
         return self._cached_image(mid, "strip", make)
 
     # --- projects ----------------------------------------------------------------
