@@ -21,8 +21,17 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install FFmpeg and the speech engine
+        timeout-minutes: 15
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+          # Package mirrors occasionally stall; give each attempt a time limit and retry.
+          for attempt in 1 2 3; do
+            if timeout 240 sudo apt-get update -q -o Acquire::Retries=3 &&
+               timeout 300 sudo apt-get install -y -q --no-install-recommends ffmpeg; then
+              break
+            fi
+            echo "apt attempt $attempt failed; retrying"; sleep 10
+          done
+          ffmpeg -hide_banner -version | head -1
           pip install faster-whisper
       - name: Run tests (including real speech recognition)
         env:
