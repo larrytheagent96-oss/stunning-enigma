@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import signal
 import sys
@@ -256,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
     except (ProjectError, RenderError, FFmpegError) as e:
         print(f"\nerror: {e}", file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # Output was piped into something like `head` that stopped reading; that's not an error.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":

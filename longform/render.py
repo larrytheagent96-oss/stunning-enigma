@@ -386,20 +386,20 @@ def _audio_graph(project: Project, total: float) -> str | None:
     if not music and not o.loudnorm:
         return None
     parts = []
-    main = "[0:a]"
+    main = "[2:a]"
     if music:
         fade = min(music.fade_out, total / 2)
-        m = (f"[2:a]aresample={AUDIO_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        m = (f"[3:a]aresample={AUDIO_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
              f"volume={music.volume:.6f}")
         if fade > 0:
             m += f",afade=t=out:st={total - fade:.6f}:d={fade:.6f}"
         parts.append(m + "[music]")
         if music.duck:
-            parts.append("[0:a]asplit=2[main][side]")
+            parts.append("[2:a]asplit=2[main][side]")
             parts.append("[music][side]sidechaincompress=threshold=0.03:ratio=8:attack=50:release=600[bed]")
             parts.append("[main][bed]amix=inputs=2:duration=first:normalize=0[mix]")
         else:
-            parts.append("[0:a][music]amix=inputs=2:duration=first:normalize=0[mix]")
+            parts.append("[2:a][music]amix=inputs=2:duration=first:normalize=0[mix]")
         main = "[mix]"
     if o.loudnorm:
         parts.append(f"{main}loudnorm=I=-16:TP=-1.5:LRA=11,aresample={AUDIO_RATE}[aout]")
@@ -500,7 +500,11 @@ def render(
         metadata = job_dir / "metadata.txt"
         _write_metadata(metadata, project, chapters)
 
-        args = ["-f", "concat", "-safe", "0", "-i", str(concat_list), "-f", "ffmetadata", "-i", str(metadata)]
+        concat = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
+        # Inputs: 0 = pieces (video), 1 = chapters, 2 = pieces again (audio), 3 = music.
+        # The audio is read separately because when one input feeds both a stream copy and a
+        # filter graph, FFmpeg can drop the last few audio frames once the video copy finishes.
+        args = [*concat, "-f", "ffmetadata", "-i", str(metadata), *concat]
         if project.music:
             music_path = (base_dir / os.path.expanduser(project.music.path)).resolve()
             if not music_path.is_file():
@@ -511,7 +515,7 @@ def render(
         if graph:
             args += ["-filter_complex", graph, "-map", "[aout]"]
         else:
-            args += ["-map", "0:a:0"]
+            args += ["-map", "2:a:0"]
         args += ["-map_metadata", "1", "-map_chapters", "1" if chapters else "-1",
                  "-c:v", "copy", "-c:a", "aac", "-b:a", o.audio_bitrate, "-ar", str(AUDIO_RATE)]
         if output.suffix.lower() in (".mp4", ".m4v", ".mov"):

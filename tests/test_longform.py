@@ -136,6 +136,19 @@ class RenderTests(MediaTestCase):
         self.assertTrue(info.has_audio and info.has_video)
         self.assertFalse((self.dir / "out" / ".longform-cache").exists())
 
+    def test_music_mix_keeps_audio_as_long_as_video(self):
+        result, _ = self.render({
+            "clips": [{"type": "title", "text": "Hi", "duration": 2}, {"path": "clip1.mp4"},
+                      {"path": "clip10.mov"}, {"path": "still.png", "duration": 2, "fade_out": 0.5}],
+            "transition": 0.4, "music": {"path": "music.mp3", "volume": 0.3},
+            "output": {"preset": "medium"},  # the bug depended on how video and audio packets interleave
+        }, "music-sync.mp4")
+        streams = json.loads(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "json",
+             str(result.output)], capture_output=True, text=True, check=True).stdout)["streams"]
+        lengths = {s["codec_type"]: float(s["duration"]) for s in streams if s["codec_type"] in ("video", "audio")}
+        self.assertAlmostEqual(lengths["audio"], lengths["video"], delta=0.005)
+
     def test_missing_file_and_bad_trim_are_reported(self):
         with self.assertRaisesRegex(RenderError, "clip 1"):
             self.render({"clips": ["nope.mp4"]})
