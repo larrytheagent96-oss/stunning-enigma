@@ -25,11 +25,12 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
+from . import captions as caps
 from . import ffmpeg
 from .ffmpeg import Cancelled, FFmpegError, MediaInfo
 from .project import Clip, Output, Project, ProjectError
 
-CACHE_VERSION = "2"
+CACHE_VERSION = "3"
 DEFAULT_IMAGE_SECONDS = 5.0
 DEFAULT_TITLE_SECONDS = 4.0
 AUDIO_RATE = 48000
@@ -51,6 +52,7 @@ class ClipPlan:
     duration: float
     transition_in: float = 0.0  # seconds overlapped with the previous clip
     transition_out: float = 0.0  # seconds overlapped with the next clip
+    captions: list[dict] | None = None  # caption lines in the source file's timeline
 
     @property
     def label(self) -> str:
@@ -62,17 +64,18 @@ class ClipPlan:
 
 
 @dataclass
-class Part:
+class _Part:
     """A window of one clip: `length` seconds starting `offset` seconds into it."""
     clip: ClipPlan
     offset: float
     length: float
+    captions_ass: str | None = None  # subtitles to burn into this window, if any
 
 
 @dataclass
 class Piece:
     kind: str  # "body" or "transition"
-    parts: list[Part]  # one part for a body, outgoing then incoming clip for a transition
+    parts: list[_Part]  # one part for a body, outgoing then incoming clip for a transition
     length: float
     path: Path
     style: str | None = None
@@ -109,6 +112,7 @@ class RenderResult:
     chapters: list[Chapter]
     segments_rendered: int
     segments_cached: int
+    captions_file: Path | None = None
 
     def chapter_text(self) -> str:
         """Chapters as timestamps, the format YouTube and most players accept."""
@@ -159,6 +163,16 @@ def pieces_for(project: Project, plans: list[ClipPlan], cache_dir: Path) -> list
     """Lay the clips out as bodies and transition pieces, in playing order."""
     o = project.output
     pieces = []
+
+    def Part(plan: ClipPlan, offset: float, length: float) -> _Part:
+        part = _Part(plan, offset, length)
+        if plan.captions:
+            lines = caps.lines_in_window(plan.captions, plan.clip.start + offset, length)
+            if lines:
+                part.captions_ass = caps.ass_document(lines, o.width, o.height,
+                                                      project.captions.style, project.captions.size)
+        return part
+
     for p in plans:
         if p.transition_in:
             prev = plans[p.index - 1]
@@ -176,7 +190,7 @@ def pieces_for(project: Project, plans: list[ClipPlan], cache_dir: Path) -> list
     return pieces
 
 
-def _piece(kind: str, parts: list[Part], o: Output, cache_dir: Path, **extra) -> Piece:
+def _piece(kind: str, parts: list[_Part], o: Output, cache_dir: Path, **extra) -> Piece:
     length = parts[-1].length
     material = {
         "v": CACHE_VERSION,
@@ -190,14 +204,15 @@ def _piece(kind: str, parts: list[Part], o: Output, cache_dir: Path, **extra) ->
     return Piece(kind, parts, length, cache_dir / f"seg-{key}.mov", **extra)
 
 
-def _part_material(part: Part) -> dict:
+def _part_material(part: _Part) -> dict:
     p = part.clip
     stat = p.source.stat() if p.source else None
     ignored = {"chapter": None, "transition": None, "transition_style": None, "fade_in": None, "fade_out": None}
     return {
-        "clip": asdict(p.clip) | ignored | {"path": str(p.source) if p.source else None},
+        "clip": asdict(p.clip) | ignored | {"captions": None} | {"path": str(p.source) if p.source else None},
         "source": [stat.st_size, stat.st_mtime_ns] if stat else None,
         "offset": round(part.offset, 4),
+        "captions": hashlib.sha1(part.captions_ass.encode()).hexdigest() if part.captions_ass else None,
         "length": round(part.length, 4),
     }
 
@@ -242,7 +257,7 @@ def _fit_filter(o: Output) -> str:
     return fit + ",setsar=1"
 
 
-def _part_chain(part: Part, first_input: int, tag: str, o: Output, work: Path) -> tuple[list[str], list[str]]:
+def _part_chain(part: _Part, first_input: int, tag: str, o: Output, work: Path) -> tuple[list[str], list[str]]:
     """Inputs and filters that turn one part into normalised streams labelled [v<tag>] and [a<tag>]."""
     p, clip, length = part.clip, part.clip.clip, part.length
     size, fps = f"{o.width}x{o.height}", str(o.fps)
@@ -258,7 +273,8 @@ def _part_chain(part: Part, first_input: int, tag: str, o: Output, work: Path) -
         text_file = work / f"title-{hashlib.sha1(text.encode()).hexdigest()[:16]}.txt"
         text_file.write_text(text, encoding="utf-8")
         font_size = clip.font_size or max(12, o.height // 12)
-        drawtext = (f"drawtext=textfile={text_file.name}:fontcolor={clip.color}:fontsize={font_size}"
+        drawtext = (f"drawtext=fontfile=fonts/Inter-Bold.otf:textfile={text_file.name}"
+                    f":fontcolor={clip.color}:fontsize={font_size}"
                     f":line_spacing={font_size // 3}:x=(w-text_w)/2:y=(h-text_h)/2")
         if _drawtext_has_align():
             drawtext += ":text_align=C"
@@ -285,6 +301,13 @@ def _part_chain(part: Part, first_input: int, tag: str, o: Output, work: Path) -
     # pieces can be crossfaded with each other and joined without re-encoding.
     vf += [f"fps={fps}", "format=yuv420p", "tpad=stop_mode=clone:stop_duration=2",
            f"trim=duration={length:.6f}", "setpts=PTS-STARTPTS"]
+    if part.captions_ass:
+        # Paths are relative because FFmpeg runs inside the cache folder; that avoids
+        # escaping drive letters and spaces inside the filter graph.
+        ass_file = work / f"caps-{hashlib.sha1(part.captions_ass.encode()).hexdigest()[:16]}.ass"
+        if not ass_file.exists():
+            ass_file.write_text(part.captions_ass, encoding="utf-8")
+        vf += [f"subtitles=filename={ass_file.name}:fontsdir=fonts", "format=yuv420p"]
     af = [f"aresample={AUDIO_RATE}", "aformat=sample_fmts=s16:channel_layouts=stereo"]
     if use_source_audio and clip.volume != 1:
         af.append(f"volume={clip.volume:.6f}")
@@ -341,16 +364,22 @@ def _media_duration(path: Path) -> float:
     return info.duration
 
 
-def _chapters(project: Project, plans: list[ClipPlan], pieces: list[Piece], lengths: list[float]) -> list[Chapter]:
-    if project.chapters == "none":
-        return []
-    clip_starts: dict[int, float] = {}
+def _clip_starts(pieces: list[Piece], lengths: list[float]) -> dict[int, float]:
+    """When each clip first appears in the finished video."""
+    starts: dict[int, float] = {}
     t = 0.0
     for piece, length in zip(pieces, lengths):
         if piece.starts_clip is not None:
-            clip_starts.setdefault(piece.starts_clip, t)
+            starts.setdefault(piece.starts_clip, t)
         t += length
-    total = t
+    return starts
+
+
+def _chapters(project: Project, plans: list[ClipPlan], pieces: list[Piece], lengths: list[float]) -> list[Chapter]:
+    if project.chapters == "none":
+        return []
+    clip_starts = _clip_starts(pieces, lengths)
+    total = sum(lengths)
     marks = [(clip_starts[p.index], p.label) for p in plans
              if p.index in clip_starts and (project.chapters == "clips" or p.clip.chapter)]
     if not marks:
@@ -408,6 +437,21 @@ def _audio_graph(project: Project, total: float) -> str | None:
     return ";".join(parts)
 
 
+def _timeline_captions(plans: list[ClipPlan], clip_starts: dict[int, float]) -> list[dict]:
+    lines = []
+    for p in plans:
+        if p.captions and p.index in clip_starts:
+            for line in caps.lines_in_window(p.captions, p.clip.start, p.duration):
+                lines.append({"start": clip_starts[p.index] + line["start"],
+                              "end": clip_starts[p.index] + line["end"], "text": line["text"]})
+    return lines
+
+
+def needs_captions(p: ClipPlan) -> bool:
+    return (p.clip.type == "video" and p.clip.captions and not p.clip.mute
+            and p.info is not None and p.info.has_audio)
+
+
 def render(
     project: Project,
     output: str | os.PathLike,
@@ -418,6 +462,9 @@ def render(
     jobs: int = 2,
     progress: ProgressCallback | None = None,
     cancel: threading.Event | None = None,
+    captions_dir: str | os.PathLike | None = None,
+    transcriber: caps.Transcriber | None = None,
+    models_dir: str | os.PathLike | None = None,
 ) -> RenderResult:
     ffmpeg.require_tools()
     base_dir = Path(base_dir).resolve()
@@ -432,6 +479,35 @@ def render(
         plans = plan(project, base_dir)
     except ProjectError as e:
         raise RenderError(str(e)) from e
+    caps.install_fonts(cache)
+
+    # Captions: transcribe any clip that has no transcript yet (once per source file).
+    tx_share = 0.0
+    if project.captions.enabled:
+        store = caps.CaptionStore(Path(captions_dir) if captions_dir else cache / "captions")
+        wanted = [p for p in plans if needs_captions(p)]
+        sources = list(dict.fromkeys(p.source for p in wanted))
+        pending = [src for src in sources if store.load(src) is None]
+        tx_share = 0.3 if pending else 0.0
+        if pending:
+            transcribe = transcriber or caps.whisper_transcribe
+            lengths = {src: next(p.info.duration or 1.0 for p in wanted if p.source == src) for src in pending}
+            all_len = sum(lengths.values())
+            done_len = 0.0
+            for src in pending:
+                def tx_progress(f: float, message: str, base: float = done_len, src: Path = src) -> None:
+                    report(tx_share * (base + f * lengths[src]) / all_len, message)
+                try:
+                    store.get_or_transcribe(src, transcribe, model=project.captions.model,
+                                            language=project.captions.language,
+                                            models_dir=Path(models_dir) if models_dir else caps.default_models_dir(),
+                                            progress=tx_progress, cancel=cancel)
+                except caps.CaptionError as e:
+                    raise RenderError(str(e)) from e
+                done_len += lengths[src]
+        for p in wanted:
+            p.captions = (store.load(p.source) or {}).get("lines") or None
+
     pieces = pieces_for(project, plans, cache)
     total = sum(p.length for p in pieces)
     # Identical pieces (same file, trim and settings) are encoded once and reused.
@@ -443,12 +519,13 @@ def render(
     lock = threading.Lock()
     # Encoding the pieces is most of the work; the final join is the last 10%.
     segment_share = 0.9
+    seg_start, seg_share = tx_share, segment_share - tx_share
 
     def update(group: list[int], seconds: float, message: str) -> None:
         with lock:
             for n in group:
                 done[n] = seconds
-            fraction = segment_share * sum(done.values()) / total if total else 0
+            fraction = seg_start + seg_share * sum(done.values()) / total if total else 0
         report(fraction, message)
 
     def build(group: list[int]) -> None:
@@ -474,7 +551,7 @@ def render(
 
     cached = len(groups) - len(to_encode)
     transitions = sum(1 for p in pieces if p.kind == "transition")
-    report(0.0, f"{len(plans)} clips, {transitions} transitions, {format_timestamp(total)} total "
+    report(seg_start, f"{len(plans)} clips, {transitions} transitions, {format_timestamp(total)} total "
                 f"({cached} pieces already encoded)")
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         futures = [pool.submit(build, g) for g in to_encode]
@@ -490,6 +567,11 @@ def render(
     lengths = [measured[p.path] for p in pieces]
     total = sum(lengths)
     chapters = _chapters(project, plans, pieces, lengths)
+    captions_file = None
+    timeline_lines = _timeline_captions(plans, _clip_starts(pieces, lengths))
+    if timeline_lines:
+        captions_file = output.with_suffix(".srt")
+        captions_file.write_text(caps.srt_document(timeline_lines), encoding="utf-8")
 
     job_dir = cache / f"job-{os.getpid()}-{threading.get_ident()}"
     job_dir.mkdir(exist_ok=True)
@@ -540,12 +622,14 @@ def render(
         if not keep_cache:
             for path in groups:
                 path.unlink(missing_ok=True)
-            for leftover in cache.glob("title-*.txt"):
-                leftover.unlink(missing_ok=True)
+            for pattern in ("title-*.txt", "caps-*.ass"):
+                for leftover in cache.glob(pattern):
+                    leftover.unlink(missing_ok=True)
+            shutil.rmtree(cache / "fonts", ignore_errors=True)
             try:
                 cache.rmdir()
             except OSError:
                 pass
 
     report(1.0, f"Done: {output.name} ({format_timestamp(total)})")
-    return RenderResult(output, total, chapters, len(to_encode), cached)
+    return RenderResult(output, total, chapters, len(to_encode), cached, captions_file)

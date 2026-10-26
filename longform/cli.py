@@ -11,7 +11,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__, ffmpeg
+from . import __version__, ffmpeg, presets
+from .captions import CAPTION_STYLES, default_models_dir
 from .ffmpeg import Cancelled, FFmpegError
 from .project import TRANSITION_STYLES, Clip, Music, Project, ProjectError, clip_type_for, is_media_file
 from .render import RenderError, format_timestamp, render
@@ -61,9 +62,28 @@ def add_output_options(p: argparse.ArgumentParser) -> None:
                    help="crossfade between every pair of clips (0 = straight cuts)")
     p.add_argument("--transition", choices=TRANSITION_STYLES, metavar="STYLE",
                    help=f"crossfade style: {', '.join(TRANSITION_STYLES)} (default fade)")
+    p.add_argument("--template", choices=[t["id"] for t in presets.TEMPLATES],
+                   help="one-click look: " + ", ".join(t["id"] for t in presets.TEMPLATES))
+    p.add_argument("--export", choices=[e["id"] for e in presets.EXPORTS],
+                   help="size and quality for a platform: " + ", ".join(e["id"] for e in presets.EXPORTS))
+    p.add_argument("--captions", action="store_true", default=None,
+                   help="add automatic captions (needs: pip install faster-whisper)")
+    p.add_argument("--caption-style", choices=list(CAPTION_STYLES))
 
 
-def apply_output_options(project: Project, args: argparse.Namespace) -> None:
+def apply_output_options(project: Project, args: argparse.Namespace) -> Project:
+    """Apply --template and --export first, then any individual settings on top."""
+    if args.template or args.export:
+        data = project.to_dict()
+        if args.template:
+            data = presets.apply(data, presets.find(presets.TEMPLATES, args.template))
+        if args.export:
+            data = presets.apply(data, presets.find(presets.EXPORTS, args.export))
+        project = Project.from_dict(data)
+    if args.captions:
+        project.captions.enabled = True
+    if args.caption_style:
+        project.captions.style = args.caption_style
     if args.crossfade is not None:
         project.transition = args.crossfade
     if args.transition:
@@ -75,6 +95,7 @@ def apply_output_options(project: Project, args: argparse.Namespace) -> None:
         value = getattr(args, name)
         if value is not None:
             setattr(output, name, value)
+    return project
 
 
 def project_from_files(args: argparse.Namespace) -> Project:
@@ -86,12 +107,14 @@ def project_from_files(args: argparse.Namespace) -> Project:
             clip.duration = args.image_duration
         clips.append(clip)
     project = Project(clips=clips, chapters="clips" if args.chapters else "none")
-    apply_output_options(project, args)
     if args.title:
         project.output.title = args.title
         project.clips.insert(0, Clip(type="title", text=args.title, fade_in=args.fade, fade_out=args.fade))
     if args.music:
-        project.music = Music(path=str(Path(args.music).resolve()), volume=args.music_volume)
+        project.music = Music(path=str(Path(args.music).resolve()))
+    project = apply_output_options(project, args)
+    if project.music and args.music_volume is not None:
+        project.music.volume = args.music_volume
     return project
 
 
@@ -126,8 +149,11 @@ def do_render(project: Project, output: str, base_dir: Path, args: argparse.Name
     result = render(
         project, output, base_dir=base_dir, cache_dir=args.cache_dir, keep_cache=keep_cache,
         jobs=args.jobs, progress=ProgressBar(args.quiet), cancel=cancel,
+        captions_dir=default_models_dir().parent / "captions",
     )
     print(f"Wrote {result.output} ({format_timestamp(result.duration)})")
+    if result.captions_file:
+        print(f"Captions also saved as {result.captions_file.name} (upload it to YouTube for editable subtitles)")
     if result.chapters:
         chapters_file = result.output.with_suffix(".chapters.txt")
         chapters_file.write_text(result.chapter_text() + "\n", encoding="utf-8")
@@ -167,8 +193,7 @@ def _relative(path: Path, base: Path) -> str:
 
 def cmd_render(args: argparse.Namespace) -> int:
     project_file = Path(args.project)
-    project = Project.load(project_file)
-    apply_output_options(project, args)
+    project = apply_output_options(Project.load(project_file), args)
     output = args.output or str(project_file.with_suffix(".mp4"))
     return do_render(project, output, project_file.resolve().parent, args, keep_cache=not args.no_cache)
 
@@ -207,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--image-duration", type=float, default=5.0, help="seconds to show each image")
         p.add_argument("--chapters", action="store_true", help="add a chapter for every clip")
         p.add_argument("--music", help="background music, looped under the whole video")
-        p.add_argument("--music-volume", type=float, default=0.25)
+        p.add_argument("--music-volume", type=float, help="0 to 1 (default 0.25)")
         add_output_options(p)
 
     def render_options(p: argparse.ArgumentParser) -> None:

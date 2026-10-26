@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -10,7 +11,7 @@ import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from longform import cli, ffmpeg
+from longform import captions, cli, ffmpeg, presets
 from longform.ffmpeg import Cancelled
 from longform.project import Project, ProjectError
 from longform.render import RenderError, pieces_for, plan, render
@@ -39,6 +40,9 @@ class MediaTestCase(unittest.TestCase):
         make(d / "still.png", "mandelbrot=s=120x80", extra=("-frames:v", "1"))
         make(d / "voice.mp3", "sine=f=300:d=1.5")
         make(d / "music.mp3", "sine=f=220:d=1")
+        make(d / "talk.mp4", "testsrc=s=320x240:r=25:d=4",
+             "flite=text='Hello and welcome back to the channel. Today we are testing captions.'",
+             extra=("-af", "apad", "-t", "4"))
 
     @classmethod
     def tearDownClass(cls):
@@ -170,6 +174,98 @@ class RenderTests(MediaTestCase):
         self.assertEqual(seen, sorted(seen))
 
 
+def fake_transcriber(calls: list):
+    def transcribe(path, **kwargs):
+        calls.append(path.name)
+        return {"language": "en", "lines": [{"start": 0.5, "end": 1.5, "text": "first {line}"},
+                                            {"start": 2.0, "end": 3.5, "text": "second line"}]}
+    return transcribe
+
+
+class PresetTests(unittest.TestCase):
+    def test_every_preset_produces_a_valid_project(self):
+        base = {"clips": [{"path": "a.mp4"}, {"path": "b.png", "type": "image"}], "music": {"path": "m.mp3"}}
+        for preset in presets.TEMPLATES + presets.EXPORTS:
+            with self.subTest(preset=preset["id"]):
+                Project.from_dict(presets.apply(base, preset)).validate()
+
+    def test_templates_change_only_what_they_describe(self):
+        base = {"clips": [{"path": "a.mp4"}, {"path": "b.png", "type": "image", "duration": 9}],
+                "output": {"width": 1280, "height": 720}}
+        slideshow = presets.apply(base, presets.find(presets.TEMPLATES, "slideshow"))
+        self.assertEqual(slideshow["clips"][1]["duration"], 4)
+        self.assertNotIn("music", slideshow)  # no music chosen, so none is invented
+        self.assertEqual(slideshow["output"]["width"], 1280)  # looks never change the size
+        self.assertEqual(slideshow["template"], "slideshow")
+        cinematic = presets.apply(base, presets.find(presets.TEMPLATES, "cinematic"))
+        self.assertEqual((cinematic["clips"][0]["fade_in"], cinematic["clips"][-1]["fade_out"]), (1.5, 1.5))
+        self.assertNotIn("fade_in", base["clips"][0])  # the original is untouched
+        shorts = presets.apply(cinematic, presets.find(presets.EXPORTS, "shorts"))
+        self.assertEqual((shorts["output"]["width"], shorts["output"]["height"], shorts["output"]["fit"]),
+                         (1080, 1920, "cover"))
+        self.assertEqual(shorts["transition_style"], "fadeblack")
+        with self.assertRaises(KeyError):
+            presets.find(presets.TEMPLATES, "nope")
+
+
+class CaptionTests(MediaTestCase):
+    def test_words_are_grouped_into_short_lines(self):
+        words = [{"start": i * 0.3, "end": i * 0.3 + 0.25, "word": f" word{i}"} for i in range(12)]
+        words[5]["word"] = " end."
+        words.append({"start": 10, "end": 10.5, "word": " later"})
+        lines = captions.group_words(words)
+        self.assertTrue(all(len(l["text"]) <= captions.MAX_LINE_CHARS + 8 for l in lines))
+        self.assertTrue(lines[0]["text"].endswith("end."))  # sentence ends start a new caption
+        self.assertEqual(lines[-1]["text"], "later")  # so does a long pause
+
+    def test_documents(self):
+        lines = [{"start": 1.0, "end": 2.5, "text": "a {b} \\c\nd"}]
+        ass = captions.ass_document(lines, 1920, 1080, "bold", "large")
+        self.assertIn("Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,A (B) /C\\ND", ass)
+        self.assertIn("PlayResX: 1920", ass)
+        self.assertEqual(captions.srt_document(lines).splitlines()[1], "00:00:01,000 --> 00:00:02,500")
+        moved = captions.lines_in_window([{"start": 1, "end": 3, "text": "x"}, {"start": 9, "end": 10, "text": "y"}], 2, 5)
+        self.assertEqual(moved, [{"start": 0.0, "end": 1, "text": "x"}])
+
+    def test_captions_are_burned_in_and_exported_as_srt(self):
+        calls = []
+        data = {"clips": [{"path": "talk.mp4", "start": 0.5}, {"path": "clip10.mov"},
+                          {"path": "clip1.mp4", "captions": False}, {"path": "clip2.mkv", "mute": True}],
+                "transition": 0.4, "captions": {"enabled": True, "style": "boxed"}}
+        result, info = self.render(data, "caps.mp4", transcriber=fake_transcriber(calls),
+                                   captions_dir=self.dir / "transcripts")
+        self.assertEqual(calls, ["talk.mp4"])  # silent, opted-out and muted clips are skipped
+        srt = result.captions_file.read_text()
+        self.assertIn("00:00:00,000 --> 00:00:01,000\nfirst {line}", srt)  # trimmed by 0.5s
+        self.assertIn("00:00:01,500 --> 00:00:03,000\nsecond line", srt)
+
+        plain, _ = self.render({**data, "captions": {"enabled": False}}, "nocaps.mp4")
+        self.assertIsNone(plain.captions_file)
+        # The burned-in caption changes the picture where it is shown, and only there.
+        def frame(path, t):
+            return subprocess.run(["ffmpeg", "-v", "error", "-ss", str(t), "-i", str(path), "-frames:v", "1",
+                                   "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+        self.assertNotEqual(frame(result.output, 0.5), frame(plain.output, 0.5))
+
+        # Editing the transcript re-encodes only what shows captions, without transcribing again.
+        store = captions.CaptionStore(self.dir / "transcripts")
+        edited = store.load(self.dir / "talk.mp4")
+        edited["lines"][0]["text"] = "fixed typo"
+        store.save(self.dir / "talk.mp4", edited)
+        again, _ = self.render(data, "caps2.mp4", transcriber=fake_transcriber(calls),
+                               captions_dir=self.dir / "transcripts")
+        self.assertEqual(calls, ["talk.mp4"])
+        self.assertIn("fixed typo", again.captions_file.read_text())
+        self.assertGreaterEqual(again.segments_cached, 3)
+
+    @unittest.skipUnless(os.environ.get("LONGFORM_TEST_WHISPER"), "set LONGFORM_TEST_WHISPER=1 to run the real model")
+    def test_real_speech_recognition(self):
+        result = captions.whisper_transcribe(self.dir / "talk.mp4", model="tiny")
+        text = " ".join(l["text"] for l in result["lines"]).lower()
+        self.assertIn("welcome", text)
+        self.assertIn("caption", text)
+
+
 class TransitionTests(MediaTestCase):
     def test_crossfades_overlap_clips_and_keep_sound_in_sync(self):
         result, info = self.render({
@@ -230,7 +326,7 @@ class CliTests(MediaTestCase):
 
     def test_folders_are_sorted_naturally(self):
         names = [p.name for p in cli.expand_inputs([str(self.dir)])]
-        self.assertEqual(names, ["clip1.mp4", "clip2.mkv", "clip10.mov", "still.png"])
+        self.assertEqual(names, ["clip1.mp4", "clip2.mkv", "clip10.mov", "still.png", "talk.mp4"])
 
     def test_join(self):
         out = self.dir / "cli" / "joined.mp4"

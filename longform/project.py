@@ -81,6 +81,24 @@ class Music:
 
 
 @dataclass
+class Captions:
+    enabled: bool = False
+    style: str = "clean"  # see captions.CAPTION_STYLES
+    size: str = "medium"  # small, medium or large
+    model: str = "base"  # speech model: tiny (fastest), base, small (most accurate)
+    language: str | None = None  # None = detect automatically
+
+    def validate(self) -> None:
+        from .captions import CAPTION_SIZES, CAPTION_STYLES, WHISPER_MODELS
+        if self.style not in CAPTION_STYLES:
+            raise ProjectError(f"captions: style must be one of {', '.join(CAPTION_STYLES)}")
+        if self.size not in CAPTION_SIZES:
+            raise ProjectError(f"captions: size must be one of {', '.join(CAPTION_SIZES)}")
+        if self.model not in WHISPER_MODELS:
+            raise ProjectError(f"captions: model must be one of {', '.join(WHISPER_MODELS)}")
+
+
+@dataclass
 class Clip:
     type: str = "video"
     path: str | None = None
@@ -99,6 +117,7 @@ class Clip:
     # Crossfade from the previous clip into this one, in seconds. None uses the project default.
     transition: float | None = None
     transition_style: str | None = None
+    captions: bool = True  # include this clip when captions are turned on for the project
 
     def validate(self, index: int) -> None:
         where = f"clip {index + 1}"
@@ -135,6 +154,10 @@ class Project:
     chapters: str = "marked"  # marked = only clips with a chapter name, clips = every clip
     transition: float = 0.0  # default crossfade between clips, in seconds (0 = straight cut)
     transition_style: str = "fade"
+    captions: Captions = field(default_factory=Captions)
+    name: str | None = None
+    template: str | None = None  # the look last applied in the app
+    export_preset: str | None = None  # the platform last chosen in the app
 
     def validate(self) -> None:
         if not self.clips:
@@ -145,6 +168,7 @@ class Project:
         if self.transition < 0:
             raise ProjectError("transition cannot be negative")
         check_transition_style(self.transition_style, "project")
+        self.captions.validate()
         for i, clip in enumerate(self.clips):
             clip.validate(i)
 
@@ -180,6 +204,10 @@ class Project:
         except (TypeError, ValueError) as e:
             raise ProjectError(f"invalid transition {data.get('transition')!r}") from e
         project.transition_style = str(data.get("transition_style") or "fade")
+        project.captions = _build(Captions, data.get("captions") or {}, "captions")
+        for name in ("name", "template", "export_preset"):
+            value = data.get(name)
+            setattr(project, name, str(value) if value else None)
         return project
 
     @classmethod
