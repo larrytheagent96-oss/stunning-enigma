@@ -258,6 +258,16 @@ class CaptionTests(MediaTestCase):
         self.assertIn("fixed typo", again.captions_file.read_text())
         self.assertGreaterEqual(again.segments_cached, 3)
 
+    def test_audio_is_decoded_with_ffmpeg(self):
+        try:
+            import numpy  # noqa: F401  (comes with the speech engine)
+        except ImportError:
+            self.skipTest("numpy not installed")
+        audio = captions.load_audio(self.dir / "talk.mp4")
+        self.assertAlmostEqual(len(audio) / captions.SPEECH_RATE, 4.0, delta=0.15)  # AAC adds padding
+        self.assertGreater(float(abs(audio).max()), 0.05)
+        self.assertEqual(len(captions.load_audio(self.dir / "clip10.mov")), 0)  # no sound track
+
     @unittest.skipUnless(os.environ.get("LONGFORM_TEST_WHISPER"), "set LONGFORM_TEST_WHISPER=1 to run the real model")
     def test_real_speech_recognition(self):
         result = captions.whisper_transcribe(self.dir / "talk.mp4", model="tiny")

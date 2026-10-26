@@ -109,7 +109,11 @@ def whisper_transcribe(
         raise CaptionError(
             "Couldn't get the speech model that captions need. It's downloaded once (about 150 MB), "
             f"so check your internet connection and try again. ({e})") from e
-    segments, info = whisper.transcribe(str(path), language=language or None, word_timestamps=True,
+    report(0.0, f"Reading the sound from {path.name}")
+    audio = load_audio(path)
+    if audio.size == 0:
+        return {"language": language, "lines": [], "edited": False}
+    segments, info = whisper.transcribe(audio, language=language or None, word_timestamps=True,
                                         vad_filter=True, beam_size=5)
     words = []
     total = info.duration or 0
@@ -122,6 +126,32 @@ def whisper_transcribe(
         if total:
             report(min(segment.end / total, 1.0), f"Transcribing {path.name}")
     return {"language": info.language, "lines": group_words(words), "edited": False}
+
+
+SPEECH_RATE = 16000  # the sample rate the speech model expects
+
+
+def load_audio(path: Path):
+    """Decode a file's sound to 16 kHz mono samples with FFmpeg.
+
+    faster-whisper can decode files itself through PyAV, but that ties captions to whichever
+    PyAV version is installed (PyAV 19 broke it). FFmpeg is always here and reads every format.
+    """
+    import subprocess
+
+    import numpy as np
+
+    from .ffmpeg import NO_WINDOW
+    result = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0?", "-vn", "-ac", "1",
+         "-ar", str(SPEECH_RATE), "-f", "f32le", "-"],
+        capture_output=True, **NO_WINDOW)
+    if result.returncode != 0:
+        if b"does not contain any stream" in result.stderr:
+            return np.zeros(0, dtype=np.float32)  # the file has no sound
+        raise CaptionError(f"Couldn't read the sound from {Path(path).name}: "
+                           f"{result.stderr.decode(errors='replace').strip()[-300:]}")
+    return np.frombuffer(result.stdout, dtype=np.float32)
 
 
 Transcriber = Callable[..., dict]
