@@ -366,7 +366,8 @@ class CliTests(MediaTestCase):
 class ServerTests(MediaTestCase):
     def setUp(self):
         self.ws = Path(tempfile.mkdtemp(dir=self.dir))
-        self.server = make_server(self.ws, port=0)
+        self.exports = self.ws / "exports"
+        self.server = make_server(self.ws, port=0, export_dir=self.exports)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 
@@ -383,39 +384,81 @@ class ServerTests(MediaTestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"null")
 
-    def test_upload_edit_and_render(self):
-        status, info = self.call("PUT", "/api/upload/clip1.mp4", raw=(self.dir / "clip1.mp4").read_bytes())
-        self.assertEqual(status, 200)
-        self.assertEqual(info["path"], "media/clip1.mp4")
-        status, again = self.call("PUT", "/api/upload/clip1.mp4", raw=b"x")
-        self.assertEqual(again["name"], "clip1 (1).mp4")  # never overwrites
-        self.assertTrue(again["error"])  # and reports files ffprobe cannot read
-        self.assertEqual(len(self.call("GET", "/api/media")[1]), 2)
-
-        project = {"clips": [{"type": "title", "text": "Hi", "duration": 1}, {"path": "media/clip1.mp4"}],
-                   "output": SMALL, "filename": "web.mp4"}
-        status, job = self.call("POST", "/api/render", project)
-        self.assertEqual(status, 200, job)
-        for _ in range(200):
-            job = self.call("GET", "/api/render")[1]
+    def wait(self, job: dict) -> dict:
+        for _ in range(300):
             if job["status"] != "running":
-                break
+                return job
             time.sleep(0.1)
-        self.assertEqual(job["status"], "done", job)
-        self.assertEqual(job["output"], "renders/web.mp4")
-        self.assertAlmostEqual(ffmpeg.probe(self.ws / "renders" / "web.mp4").duration, 3, delta=0.1)
-        self.assertEqual(self.call("GET", "/api/project")[1]["clips"][1]["path"], "media/clip1.mp4")
+            job = self.call("GET", f"/api/jobs/{job['id']}")[1]
+        self.fail("job did not finish")
 
-        req = urllib.request.Request(self.base + "/renders/web.mp4", headers={"Range": "bytes=0-9"})
+    def test_library_links_files_without_copying(self):
+        status, added = self.call("POST", "/api/library", {"paths": [str(self.dir / "clip1.mp4"), str(self.dir / "music.mp3")]})
+        self.assertEqual(status, 200, added)
+        self.assertEqual(added[0]["path"], str((self.dir / "clip1.mp4").resolve()))
+        self.assertTrue(added[1]["is_audio"])
+        self.assertEqual(list((self.ws / "media").iterdir()), [])  # nothing copied
+        mid = added[0]["id"]
+        for kind in ("thumb", "filmstrip"):
+            with urllib.request.urlopen(f"{self.base}/api/{kind}/{mid}") as res:
+                self.assertEqual(res.headers["Content-Type"], "image/jpeg")
+        req = urllib.request.Request(f"{self.base}/api/media/{mid}", headers={"Range": "bytes=0-9"})
         with urllib.request.urlopen(req) as res:
             self.assertEqual((res.status, len(res.read())), (206, 10))
+        self.assertEqual(self.call("DELETE", f"/api/library/{mid}")[0], 200)
+        self.assertTrue((self.dir / "clip1.mp4").exists())  # removing a linked file never deletes it
+        self.assertEqual(len(self.call("GET", "/api/library")[1]), 1)
 
-    def test_rejects_paths_outside_workspace(self):
-        status, err = self.call("POST", "/api/render", {"clips": [str(self.dir / "clip1.mp4")], "output": SMALL})
+    def test_upload_projects_preview_and_export(self):
+        status, info = self.call("PUT", "/api/upload/my%20clip.mp4", raw=(self.dir / "clip2.mkv").read_bytes())
+        self.assertEqual(status, 200, info)
+        self.assertEqual(self.call("PUT", "/api/upload/again.mp4", raw=b"x")[1]["error"] is not None, True)
+
+        status, project = self.call("POST", "/api/projects", {"name": "Trip", "template_id": "cinematic"})
+        self.assertEqual(project["transition_style"], "fadeblack")
+        self.assertEqual(self.call("POST", "/api/projects", {"name": "Trip"})[1]["name"], "Trip 2")
+        project["clips"] = [{"type": "title", "text": "Hi", "duration": 1}, {"path": info["path"]}]
+        project["output"].update(SMALL)
+        status, saved = self.call("PUT", f"/api/projects/{project['id']}", project)
+        self.assertEqual((status, len(saved["clips"])), (200, 2))
+        names = [p["name"] for p in self.call("GET", "/api/state")[1]["projects"]]
+        self.assertEqual(sorted(names), ["Trip", "Trip 2"])
+
+        preview = self.wait(self.call("POST", "/api/preview", saved)[1])
+        self.assertEqual(preview["status"], "done", preview)
+        with urllib.request.urlopen(f"{self.base}/api/jobs/{preview['id']}/file") as res:
+            self.assertGreater(len(res.read()), 1000)
+
+        export = self.wait(self.call("POST", "/api/export", {**saved, "filename": "Final cut"})[1])
+        self.assertEqual(export["status"], "done", export)
+        self.assertEqual(Path(export["result"]["file"]), self.exports / "Final cut.mp4")
+        self.assertAlmostEqual(ffmpeg.probe(self.exports / "Final cut.mp4").duration, 1.52, delta=0.05)  # overlap capped at half a clip
+        again = self.wait(self.call("POST", "/api/export", {**saved, "filename": "Final cut"})[1])
+        self.assertEqual(Path(again["result"]["file"]).name, "Final cut (2).mp4")  # never overwrites
+
+        dup = self.call("POST", f"/api/projects/{project['id']}/duplicate")[1]
+        self.assertEqual(dup["name"], "Trip copy")
+        self.assertEqual(self.call("DELETE", f"/api/projects/{dup['id']}")[0], 200)
+        self.assertEqual(self.call("GET", f"/api/projects/{dup['id']}")[0], 404)
+
+    def test_caption_editing(self):
+        mid = self.call("POST", "/api/library", {"paths": [str(self.dir / "talk.mp4")]})[1][0]["id"]
+        self.assertEqual(self.call("GET", f"/api/captions/{mid}")[0], 404)
+        lines = [{"start": 0.2, "end": 1.0, "text": "hello"}, {"start": 1.0, "end": 0.5, "text": "bad"}]
+        status, saved = self.call("PUT", f"/api/captions/{mid}", {"lines": lines})
+        self.assertEqual((status, saved["lines"], saved["edited"]),
+                         (200, [{"start": 0.2, "end": 1.0, "text": "hello"}], True))
+        self.assertTrue(self.call("GET", "/api/library")[1][0]["has_captions"])
+
+    def test_rejects_files_outside_the_library(self):
+        project = self.call("POST", "/api/projects", {})[1]
+        project["clips"] = [{"path": str(self.dir / "clip1.mp4")}]
+        status, err = self.call("POST", "/api/export", project)
         self.assertEqual(status, 400)
-        self.assertIn("outside", err["error"])
-        self.assertEqual(self.call("GET", "/media/..%2fproject.json")[0], 400)
-        self.assertEqual(self.call("PUT", "/api/upload/evil.sh", raw=b"x")[0], 400)
+        self.assertIn("not in the library", err["error"])
+        self.assertEqual(self.call("POST", "/api/library", {"paths": ["/etc/hostname"]})[0], 400)
+        self.assertEqual(self.call("GET", "/api/projects/..%2f..%2fsettings")[0], 404)
+        self.assertEqual(self.call("GET", "/api/media/0000000000000000")[0], 404)
 
 
 if __name__ == "__main__":

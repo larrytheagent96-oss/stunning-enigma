@@ -106,7 +106,9 @@ def whisper_transcribe(
         whisper = WhisperModel(model, device="cpu", compute_type="int8",
                                download_root=str(models_dir) if models_dir else None)
     except Exception as e:  # network problems, disk full, ...
-        raise CaptionError(f"Could not load the speech model: {e}") from e
+        raise CaptionError(
+            "Couldn't get the speech model that captions need. It's downloaded once (about 150 MB), "
+            f"so check your internet connection and try again. ({e})") from e
     segments, info = whisper.transcribe(str(path), language=language or None, word_timestamps=True,
                                         vad_filter=True, beam_size=5)
     words = []
